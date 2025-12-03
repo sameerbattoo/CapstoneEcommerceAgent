@@ -1,0 +1,42 @@
+[
+  {
+    "description": "Get product reviews with optional filters. Returns reviews matching the specified criteria. All parameters are optional - if no parameters provided, returns all reviews (limited by top_rows). Use product_id for efficient queries. Supports filtering by customer, product name, email, date range, or combinations thereof. All ID and name parameters accept comma-separated lists for multiple values (OR logic).",
+    "inputSchema": {
+      "properties": {
+        "product_id": {
+          "type": "string",
+          "description": "Filter reviews by product ID(s). Single ID (e.g., '1') or comma-separated list (e.g., '1,5,10'). When provided, uses efficient DynamoDB Query operation."
+        },
+        "product_name": {
+          "type": "string",
+          "description": "Filter reviews by product name(s) (partial match, case-sensitive). Single name (e.g., 'Laptop') or comma-separated list (e.g., 'Laptop,Mouse,Keyboard'). Uses OR logic for multiple values."
+        },
+        "customer_id": {
+          "type": "string",
+          "description": "Filter reviews by customer ID(s). Single ID (e.g., '5') or comma-separated list (e.g., '1,5,10'). Uses OR logic for multiple values."
+        },
+        "customer_email": {
+          "type": "string",
+          "description": "Filter reviews by customer email(s) (partial match, case-sensitive). Single email (e.g., 'john') or comma-separated list (e.g., 'john,jane,bob'). Uses OR logic for multiple values."
+        },
+        "review_date_from": {
+          "type": "string",
+          "format": "date",
+          "description": "Start date for review date range filter in ISO format (YYYY-MM-DD). Example: 2024-01-01"
+        },
+        "review_date_to": {
+          "type": "string",
+          "format": "date",
+          "description": "End date for review date range filter in ISO format (YYYY-MM-DD). Example: 2024-12-31"
+        },
+        "top_rows": {
+          "type": "integer",
+          "description": "Limit the number of rows returned. Default: 20, Minimum: 1, Maximum: 20. Results are sorted by review_date descending before applying limit."
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "get_product_reviews"
+  }
+]

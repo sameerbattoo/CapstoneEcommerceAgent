@@ -1,0 +1,349 @@
+{
+	"Version": "2012-10-17",
+	"Statement": [
+		{
+			"Sid": "ECRImageAccess",
+			"Effect": "Allow",
+			"Action": [
+				"ecr:BatchGetImage",
+				"ecr:GetDownloadUrlForLayer"
+			],
+			"Resource": [
+				"arn:aws:ecr:us-west-2:175918693907:repository/*"
+			]
+		},
+		{
+			"Effect": "Allow",
+			"Action": [
+				"logs:DescribeLogStreams",
+				"logs:CreateLogGroup"
+			],
+			"Resource": [
+				"arn:aws:logs:us-west-2:175918693907:log-group:/aws/bedrock-agentcore/runtimes/*"
+			]
+		},
+		{
+			"Effect": "Allow",
+			"Action": [
+				"logs:DescribeLogGroups"
+			],
+			"Resource": [
+				"arn:aws:logs:us-west-2:175918693907:log-group:*"
+			]
+		},
+		{
+			"Effect": "Allow",
+			"Action": [
+				"logs:CreateLogStream",
+				"logs:PutLogEvents"
+			],
+			"Resource": [
+				"arn:aws:logs:us-west-2:175918693907:log-group:/aws/bedrock-agentcore/runtimes/*:log-stream:*"
+			]
+		},
+		{
+			"Sid": "ECRTokenAccess",
+			"Effect": "Allow",
+			"Action": [
+				"ecr:GetAuthorizationToken"
+			],
+			"Resource": "*"
+		},
+		{
+			"Effect": "Allow",
+			"Action": [
+				"xray:PutTraceSegments",
+				"xray:PutTelemetryRecords",
+				"xray:GetSamplingRules",
+				"xray:GetSamplingTargets"
+			],
+			"Resource": [
+				"*"
+			]
+		},
+		{
+			"Effect": "Allow",
+			"Resource": "*",
+			"Action": "cloudwatch:PutMetricData",
+			"Condition": {
+				"StringEquals": {
+					"cloudwatch:namespace": "bedrock-agentcore"
+				}
+			}
+		},
+		{
+			"Effect": "Allow",
+			"Action": [
+				"logs:CreateLogGroup",
+				"logs:PutDeliverySource",
+				"logs:PutDeliveryDestination",
+				"logs:CreateDelivery",
+				"logs:GetDeliverySource",
+				"logs:DeleteDeliverySource",
+				"logs:DeleteDeliveryDestination"
+			],
+			"Resource": "*"
+		},
+		{
+			"Sid": "BedrockAgentCoreRuntime",
+			"Effect": "Allow",
+			"Action": [
+				"bedrock-agentcore:InvokeAgentRuntime",
+				"bedrock-agentcore:InvokeAgentRuntimeForUser"
+			],
+			"Resource": [
+				"arn:aws:bedrock-agentcore:us-west-2:175918693907:runtime/*"
+			]
+		},
+		{
+            "Effect": "Allow",
+            "Action": [
+                "bedrock-agentcore:InvokeAgent"
+            ],
+            "Resource": "arn:aws:bedrock-agentcore:us-west-2:175918693907:runtime/*"
+        },
+		{
+            "Sid": "InvokeBedrockAgentCoreGateway",
+            "Effect": "Allow",
+            "Action": "bedrock-agentcore:InvokeGateway",
+            "Resource": "arn:aws:bedrock-agentcore:us-west-2:175918693907:gateway/*"
+        },
+		{
+			"Sid": "BedrockAgentCoreMemoryCreateMemory",
+			"Effect": "Allow",
+			"Action": [
+				"bedrock-agentcore:CreateMemory"
+			],
+			"Resource": "*"
+		},
+		{
+			"Sid": "BedrockAgentCoreMemory",
+			"Effect": "Allow",
+			"Action": [
+				"bedrock-agentcore:CreateEvent",
+				"bedrock-agentcore:GetEvent",
+				"bedrock-agentcore:GetMemory",
+				"bedrock-agentcore:GetMemoryRecord",
+				"bedrock-agentcore:ListActors",
+				"bedrock-agentcore:ListEvents",
+				"bedrock-agentcore:ListMemoryRecords",
+				"bedrock-agentcore:ListSessions",
+				"bedrock-agentcore:DeleteEvent",
+				"bedrock-agentcore:DeleteMemoryRecord",
+				"bedrock-agentcore:RetrieveMemoryRecords"
+			],
+			"Resource": [
+				"arn:aws:bedrock-agentcore:us-west-2:175918693907:memory/*"
+			]
+		},
+		{
+			"Sid": "BedrockAgentCoreIdentityGetResourceApiKey",
+			"Effect": "Allow",
+			"Action": [
+				"bedrock-agentcore:GetResourceApiKey"
+			],
+			"Resource": [
+				"arn:aws:bedrock-agentcore:us-west-2:175918693907:token-vault/default",
+				"arn:aws:bedrock-agentcore:us-west-2:175918693907:token-vault/default/apikeycredentialprovider/*",
+				"arn:aws:bedrock-agentcore:us-west-2:175918693907:workload-identity-directory/default",
+				"arn:aws:bedrock-agentcore:us-west-2:175918693907:workload-identity-directory/default/workload-identity/*"
+			]
+		},
+		{
+			"Sid": "BedrockAgentCoreIdentityGetCredentialProviderClientSecret",
+			"Effect": "Allow",
+			"Action": [
+				"secretsmanager:GetSecretValue"
+			],
+			"Resource": [
+				"arn:aws:secretsmanager:us-west-2:175918693907:secret:bedrock-agentcore-identity!default/oauth2/*",
+				"arn:aws:secretsmanager:us-west-2:175918693907:secret:bedrock-agentcore-identity!default/apikey/*"
+			]
+		},
+		{
+			"Sid": "BedrockAgentCoreIdentityGetResourceOauth2Token",
+			"Effect": "Allow",
+			"Action": [
+				"bedrock-agentcore:GetResourceOauth2Token"
+			],
+			"Resource": [
+				"arn:aws:bedrock-agentcore:us-west-2:175918693907:token-vault/default",
+				"arn:aws:bedrock-agentcore:us-west-2:175918693907:token-vault/default/oauth2credentialprovider/*",
+				"arn:aws:bedrock-agentcore:us-west-2:175918693907:workload-identity-directory/default",
+				"arn:aws:bedrock-agentcore:us-west-2:175918693907:workload-identity-directory/default/workload-identity/*"
+			]
+		},
+		{
+			"Sid": "BedrockModelInvocation",
+			"Effect": "Allow",
+			"Action": [
+				"bedrock:InvokeModel",
+				"bedrock:InvokeModelWithResponseStream",
+				"bedrock:ApplyGuardrail"
+			],
+			"Resource": [
+				"arn:aws:bedrock:*::foundation-model/*",
+				"arn:aws:bedrock:*:*:inference-profile/*",
+				"arn:aws:bedrock:us-west-2:175918693907:*"
+			]
+		},
+		{
+			"Sid": "MarketplaceSubscribeOnFirstCall",
+			"Effect": "Allow",
+			"Action": [
+				"aws-marketplace:ViewSubscriptions",
+				"aws-marketplace:Subscribe"
+			],
+			"Resource": "*",
+			"Condition": {
+				"StringEquals": {
+					"aws:CalledViaLast": "bedrock.amazonaws.com"
+				}
+			}
+		},
+		{
+			"Sid": "BedrockAgentCoreCodeInterpreter",
+			"Effect": "Allow",
+			"Action": [
+				"bedrock-agentcore:CreateCodeInterpreter",
+				"bedrock-agentcore:StartCodeInterpreterSession",
+				"bedrock-agentcore:InvokeCodeInterpreter",
+				"bedrock-agentcore:StopCodeInterpreterSession",
+				"bedrock-agentcore:DeleteCodeInterpreter",
+				"bedrock-agentcore:ListCodeInterpreters",
+				"bedrock-agentcore:GetCodeInterpreter",
+				"bedrock-agentcore:GetCodeInterpreterSession",
+				"bedrock-agentcore:ListCodeInterpreterSessions"
+			],
+			"Resource": [
+				"arn:aws:bedrock-agentcore:us-west-2:aws:code-interpreter/*",
+				"arn:aws:bedrock-agentcore:us-west-2:175918693907:code-interpreter/*",
+				"arn:aws:bedrock-agentcore:us-west-2:175918693907:code-interpreter-custom/*"
+			]
+		},
+		{
+			"Sid": "BedrockAgentCoreIdentity",
+			"Effect": "Allow",
+			"Action": [
+				"bedrock-agentcore:CreateWorkloadIdentity",
+				"bedrock-agentcore:GetWorkloadAccessTokenForUserId"
+			],
+			"Resource": [
+				"arn:aws:bedrock-agentcore:us-west-2:175918693907:workload-identity-directory/default",
+				"arn:aws:bedrock-agentcore:us-west-2:175918693907:workload-identity-directory/default/workload-identity/*"
+			]
+		},
+		{
+			"Sid": "BedrockKnowledgeBaseAccess",
+			"Effect": "Allow",
+			"Action": [
+				"bedrock:Retrieve",
+				"bedrock:RetrieveAndGenerate"
+			],
+			"Resource": [
+				"arn:aws:bedrock:us-west-2:175918693907:knowledge-base/H36GPUOAYX"
+			]
+		},
+		{
+			"Sid": "BedrockAgentRuntimeKnowledgeBase",
+			"Effect": "Allow",
+			"Action": [
+				"bedrock-agent-runtime:Retrieve",
+				"bedrock-agent-runtime:RetrieveAndGenerate"
+			],
+			"Resource": [
+				"arn:aws:bedrock:us-west-2:175918693907:knowledge-base/H36GPUOAYX"
+			]
+		},
+		{
+			"Sid": "BedrockAgentGetKnowledgeBase",
+			"Effect": "Allow",
+			"Action": [
+				"bedrock-agent:GetKnowledgeBase"
+			],
+			"Resource": [
+				"arn:aws:bedrock:us-west-2:175918693907:knowledge-base/H36GPUOAYX"
+			]
+		},
+		{
+			"Sid": "RDSDataAccess",
+			"Effect": "Allow",
+			"Action": [
+				"rds-data:ExecuteStatement",
+				"rds-data:BatchExecuteStatement",
+				"rds-data:BeginTransaction",
+				"rds-data:CommitTransaction",
+				"rds-data:RollbackTransaction"
+			],
+			"Resource": [
+				"arn:aws:rds:us-west-2:175918693907:cluster:capstone-ecommerce"
+			]
+		},
+		{
+			"Sid": "RDSDescribeAccess",
+			"Effect": "Allow",
+			"Action": [
+				"rds:DescribeDBClusters",
+				"rds:DescribeDBInstances"
+			],
+			"Resource": [
+				"arn:aws:rds:us-west-2:175918693907:cluster:capstone-ecommerce",
+				"arn:aws:rds:us-west-2:175918693907:db:*"
+			]
+		},
+		{
+			"Sid": "SecretsManagerRDSPassword",
+			"Effect": "Allow",
+			"Action": [
+				"secretsmanager:GetSecretValue",
+				"secretsmanager:DescribeSecret"
+			],
+			"Resource": [
+				"arn:aws:secretsmanager:us-west-2:175918693907:secret:rds-db-credentials/*",
+				"arn:aws:secretsmanager:us-west-2:175918693907:secret:capstone-ecommerce-*"
+			]
+		},
+		{
+			"Sid": "EC2NetworkAccess",
+			"Effect": "Allow",
+			"Action": [
+				"ec2:DescribeSecurityGroups",
+				"ec2:DescribeSubnets",
+				"ec2:DescribeVpcs",
+				"ec2:CreateNetworkInterface",
+				"ec2:DescribeNetworkInterfaces",
+				"ec2:DeleteNetworkInterface"
+			],
+			"Resource": "*"
+		},
+		{
+			"Sid": "S3KnowledgeBaseAccess",
+			"Effect": "Allow",
+			"Action": [
+				"s3:GetObject",
+				"s3:ListBucket"
+			],
+			"Resource": [
+				"arn:aws:s3:::*bedrock*",
+				"arn:aws:s3:::*bedrock*/*",
+				"arn:aws:s3:::*knowledge-base*",
+				"arn:aws:s3:::*knowledge-base*/*"
+			]
+		},
+		{
+			"Sid": "BedrockModelAccessForKB",
+			"Effect": "Allow",
+			"Action": [
+				"bedrock:InvokeModel",
+				"bedrock:InvokeModelWithResponseStream",
+				"bedrock:GetInferenceProfile"
+			],
+			"Resource": [
+				"arn:aws:bedrock:us-west-2::foundation-model/amazon.titan-embed-text-v1",
+				"arn:aws:bedrock:us-west-2::foundation-model/amazon.titan-embed-text-v2:0",
+				"arn:aws:bedrock:*::foundation-model/*",
+				"arn:aws:bedrock:*:*:inference-profile/*"
+			]
+		}
+	]
+}
