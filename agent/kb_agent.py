@@ -111,9 +111,9 @@ class KnowledgeBaseAgent:
     def __init__(self, logger: logging.Logger, kb_id: str, aws_region: str, model_arn: str):
         
         # Get AWS region & other config value from environment or parameter
-        self.kb_id = kb_id or os.getenv("KB_ID")
-        self.region = aws_region or os.getenv("AWS_REGION")
-        self.model_arn = model_arn or os.getenv("BEDROCK_MODEL_ARN")
+        self.kb_id = kb_id 
+        self.region = aws_region 
+        self.model_arn = model_arn
         self.logger = logger
 
         log_info(logger, "KnowledgeBaseAgent.Init", f"Starting function, Kb Id:{kb_id}, Region:{aws_region}, Model ARN:{model_arn}")

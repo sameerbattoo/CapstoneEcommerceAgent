@@ -194,8 +194,8 @@ class SQLAgent:
 
         # Get AWS region & other config value from environment or parameter
         self.db_config = db_config
-        self.model_id = model_id or os.getenv("BEDROCK_MODEL_ID")
-        self.region = aws_region or os.getenv("AWS_REGION")
+        self.model_id = model_id
+        self.region = aws_region
         self.logger = logger
         log_info(logger, "SQLAgent.Init", f"Starting function, Database:{db_config["database"]}, Region:{aws_region}, Model ID:{model_id}")
 

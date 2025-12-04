@@ -2,7 +2,7 @@
 
 An intelligent e-commerce assistant powered by AWS Bedrock AgentCore, featuring multi-agent orchestration, knowledge base integration, and SQL query capabilities.
 
-![Architecture](generated-diagrams/ecommerce_agent_architecture.png.png)
+![Architecture](generated-diagrams/Capstone-ECommerce-Agent.png)
 
 ## Overview
 
@@ -99,9 +99,35 @@ Using `pip`:
 pip install -r requirements.txt
 ```
 
-### 2. Configure Environment Variables
+### 2. Configure Secrets in AWS Secrets Manager
 
-Create a `.env` file:
+**Production (Recommended):** Store configuration in AWS Secrets Manager
+
+```bash
+# Create secret with all configuration
+aws secretsmanager create-secret \
+    --name capstone-ecommerce-agent-config \
+    --description "Configuration for ECommerce Agent" \
+    --secret-string '{
+        "AWS_REGION": "us-west-2",
+        "BEDROCK_MODEL_ID": "anthropic.claude-3-5-sonnet-20241022-v2:0",
+        "BEDROCK_MODEL_ARN": "arn:aws:bedrock:us-west-2::foundation-model/anthropic.claude-3-5-sonnet-20241022-v2:0",
+        "KB_ID": "your-knowledge-base-id",
+        "DB_HOST": "your-rds-endpoint",
+        "DB_PORT": "5432",
+        "DB_NAME": "ecommerce",
+        "DB_USER": "postgres",
+        "DB_PASSWORD": "your-password",
+        "AGENTCORE_MEMORY_ID": "your-memory-id",
+        "GATEWAY_URL": "your-agentcore-gateway-url"
+    }' \
+    --region us-west-2
+```
+
+**Local Development (Optional):** Create a `.env` file for local testing
+
+The agent automatically falls back to `.env` if Secrets Manager is unavailable:
+
 ```bash
 AWS_REGION=us-west-2
 BEDROCK_MODEL_ID=anthropic.claude-3-5-sonnet-20241022-v2:0
@@ -112,7 +138,24 @@ DB_PORT=5432
 DB_NAME=ecommerce
 DB_USER=postgres
 DB_PASSWORD=your-password
+AGENTCORE_MEMORY_ID=your-memory-id
 GATEWAY_URL=your-agentcore-gateway-url
+```
+
+**Update IAM Permissions:** Add Secrets Manager access to `prereqs/agent_role.json`:
+
+```json
+{
+  "Sid": "SecretsManagerAccess",
+  "Effect": "Allow",
+  "Action": [
+    "secretsmanager:GetSecretValue",
+    "secretsmanager:DescribeSecret"
+  ],
+  "Resource": [
+    "arn:aws:secretsmanager:us-west-2:*:secret:capstone-ecommerce-agent-config-*"
+  ]
+}
 ```
 
 ### 3. Deploy Infrastructure
@@ -227,6 +270,7 @@ IAM permissions for:
 - RDS connectivity
 - S3 access
 - AgentCore services
+- **AWS Secrets Manager** (for configuration retrieval)
 
 ## Development
 
@@ -283,7 +327,55 @@ Tables: customers, products, orders, order_items, categories
 
 See `prereqs/database/sample_data.sql` for schema and sample data.
 
+## Configuration Management
+
+### Secrets Manager (Production)
+
+The agent uses AWS Secrets Manager for secure configuration management:
+
+**Benefits:**
+- ✅ Centralized secret management
+- ✅ Automatic rotation support
+- ✅ Audit trail via CloudTrail
+- ✅ No secrets in code or environment variables
+- ✅ IAM-based access control
+
+**How it works:**
+1. Agent attempts to load configuration from Secrets Manager on startup
+2. If successful, logs: `Successfully loaded X configuration values from Secrets Manager`
+3. If Secrets Manager is unavailable, falls back to `.env` file
+4. Logs which configuration source was used
+
+**Update secrets:**
+```bash
+# Update a single value
+aws secretsmanager update-secret \
+    --secret-id capstone-ecommerce-agent-config \
+    --secret-string '{...updated JSON...}' \
+    --region us-west-2
+
+# No code redeployment needed - restart agent to pick up changes
+uv run agentcore launch
+```
+
+**Cost:** ~$0.40/month per secret + $0.05 per 10,000 API calls
+
+### Local Development
+
+For local testing without AWS credentials:
+1. Create `.env` file with configuration
+2. Agent automatically falls back to `.env` when Secrets Manager is unavailable
+3. Logs: `Using .env file for configuration`
+
 ## Troubleshooting
+
+### Secrets Manager Access Denied
+
+If you see "Error loading secrets from AWS Secrets Manager":
+1. Verify IAM role has `secretsmanager:GetSecretValue` permission
+2. Check secret name matches: `capstone-ecommerce-agent-config`
+3. Verify region matches your deployment
+4. Agent will fall back to `.env` file automatically
 
 ### MCP Client Errors
 
@@ -314,6 +406,18 @@ Lambda uses AWS_IAM authentication. Ensure AgentCore execution role has:
 }
 ```
 
+### Configuration Not Loading
+
+Check CloudWatch Logs for:
+```
+Successfully loaded 10 configuration values from Secrets Manager
+```
+
+If you see fallback message, verify:
+1. Secret exists: `aws secretsmanager describe-secret --secret-id capstone-ecommerce-agent-config`
+2. IAM permissions are attached to execution role
+3. Region is correct in both secret and agent configuration
+
 ## Contributing
 
 1. Create feature branch
@@ -327,5 +431,4 @@ Lambda uses AWS_IAM authentication. Ensure AgentCore execution role has:
 [Your License Here]
 
 ## Contact
-
-[Your Contact Information]
+Sameer Battoo (battoo.sameer@live.com)

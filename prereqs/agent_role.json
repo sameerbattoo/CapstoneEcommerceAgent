@@ -344,6 +344,17 @@
 				"arn:aws:bedrock:*::foundation-model/*",
 				"arn:aws:bedrock:*:*:inference-profile/*"
 			]
+		},
+		{
+			"Sid": "SecretsManagerAccess",
+			"Effect": "Allow",
+			"Action": [
+				"secretsmanager:GetSecretValue",
+				"secretsmanager:DescribeSecret"
+			],
+			"Resource": [
+				"arn:aws:secretsmanager:us-west-2:175918693907:secret:capstone-ecommerce-agent-config*"
+			]
 		}
 	]
 }

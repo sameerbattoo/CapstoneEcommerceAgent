@@ -42,6 +42,8 @@ import httpx
 from typing import Generator
 from datetime import timedelta
 
+AWS_SECRET_NAME = "capstone-ecommerce-agent-config" # AWS Secret Manager 
+
 #=====================================================================================
 # Configure logging
 # For AWS Lambda/AgentCore: StreamHandler writes to stdout, which Lambda captures and sends to CloudWatch
@@ -92,6 +94,7 @@ class SigV4HTTPXAuth(httpx.Auth):
 
         yield request
 
+
 #=====================================================================================
 # Function to get the list of all tools from a MCP Server
 def get_full_tools_list(client):
@@ -122,6 +125,39 @@ def validate_and_set_env_variable(env_variable: str) -> str:
     return env_variable_val
 
 #=====================================================================================
+# Helper function to Load configuration from AWS Secrets Manager
+def load_secrets_from_aws() -> bool:
+    """Load configuration from AWS Secrets Manager"""
+    import boto3
+    from botocore.exceptions import ClientError
+    
+    load_dotenv() # Get the AWS_SECRET_NAME & AWS_REGION from env, override the rest from Secrets Manager
+    secret_name = os.getenv("AWS_SECRET_NAME", AWS_SECRET_NAME)
+    region_name = os.getenv("AWS_REGION", "us-west-2")  # Fallback to env or default
+    
+    try:
+        session = boto3.session.Session()
+        client = session.client(
+            service_name='secretsmanager',
+            region_name=region_name
+        )
+        
+        get_secret_value_response = client.get_secret_value(SecretId=secret_name)
+        secret = json.loads(get_secret_value_response['SecretString'])
+        
+        # Set environment variables from secret
+        for key, value in secret.items():
+            os.environ[key] = str(value)
+        
+        logger.info(f"Successfully loaded {len(secret)} configuration values from Secrets Manager")
+        return True
+        
+    except ClientError as e:
+        logger.error(f"Error loading secrets from AWS Secrets Manager: {str(e)}")
+        logger.info("Falling back to .env file")
+        return False
+
+#=====================================================================================
 def log_conversation(role: str, content: str, tool_calls: Optional[List] = None) -> None:
     """Log each conversation turn with timestamp and optional tool calls"""
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -137,8 +173,8 @@ def log_conversation(role: str, content: str, tool_calls: Optional[List] = None)
 # ADDED: BEDROCK_AGENTCORE APP CREATION
 app = BedrockAgentCoreApp()
 
-# Load environment variables from .env file
-load_dotenv()
+# Load environment variables from AWS Secrets Manager (with .env fallback)
+load_secrets_from_aws()
 
 # Set - AWS Region, Model ID and ARN, KB ID from environment variables
 AWS_REGION = validate_and_set_env_variable("AWS_REGION")
@@ -331,7 +367,6 @@ def initialize_agent_client(memory_config: AgentCoreMemoryConfig):
     - get_answers_for_unstructured_data: for any query related to Product Knowledge Base, this toll already has the capability to query the knowledgebase based on user query and get the formatted results.
     - ProductReviewLambda___get_product_reviews: for any queries related to product reviews and sentiments.
     - current_time: for current time infomation.
-  
 
     Your responsibilities:
     - Categorize the user query and find out which of the above listed tools can answer the question.
@@ -350,6 +385,11 @@ def initialize_agent_client(memory_config: AgentCoreMemoryConfig):
         3) Please collect all these tool calls and display them at the end within <details> tag.
 
     Remember previous context from the conversation when responding.
+
+    IMPORTANT: When thinking about how to answer the users question or using tools, please:
+    1. Provide text output to the user, this helps users understand your reasoning process while waiting.
+    2. Then provide your final answer
+    3. When providing the finaly answer keep the summary / insights crisp and short.
     """
 
     if _agent_client is None:

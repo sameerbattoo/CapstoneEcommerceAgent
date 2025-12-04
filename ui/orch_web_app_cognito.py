@@ -15,18 +15,64 @@ from audio_recorder_streamlit import audio_recorder
 import hmac
 import hashlib
 import base64
+import pickle
+from pathlib import Path
 
 
-def get_secret_hash(username: str, client_id: str, client_secret: str) -> str:
-    """Generate secret hash for Cognito authentication."""
-    message = bytes(username + client_id, 'utf-8')
-    secret = bytes(client_secret, 'utf-8')
-    dig = hmac.new(secret, msg=message, digestmod=hashlib.sha256).digest()
-    return base64.b64encode(dig).decode()
+# ==========================================================================
+# Session Persistence Helper
+def get_session_file():
+    """Get the path to the session file."""
+    session_dir = Path.home() / ".streamlit_sessions"
+    session_dir.mkdir(exist_ok=True)
+    return session_dir / "auth_session.pkl"
 
+def save_auth_session(username, id_token, access_token, refresh_token):
+    """Save authentication session to disk."""
+    try:
+        session_data = {
+            "username": username,
+            "id_token": id_token,
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "timestamp": time.time()
+        }
+        with open(get_session_file(), "wb") as f:
+            pickle.dump(session_data, f)
+    except Exception as e:
+        st.warning(f"Could not save session: {e}")
 
+def load_auth_session():
+    """Load authentication session from disk."""
+    try:
+        session_file = get_session_file()
+        if session_file.exists():
+            with open(session_file, "rb") as f:
+                session_data = pickle.load(f)
+            
+            # Check if session is less than 24 hours old
+            if time.time() - session_data.get("timestamp", 0) < 86400:
+                return session_data
+            else:
+                # Session expired, delete it
+                session_file.unlink()
+    except Exception:
+        pass
+    return None
+
+def clear_auth_session():
+    """Clear authentication session from disk."""
+    try:
+        session_file = get_session_file()
+        if session_file.exists():
+            session_file.unlink()
+    except Exception:
+        pass
+
+# ==========================================================================
+# State Initialization for the UI
 def init_session_state():
-    """Initialize session state variables."""
+    """Initialize session state variables and restore from saved session if available."""
     if "messages" not in st.session_state:
         st.session_state.messages = []
     if "agent_ready" not in st.session_state:
@@ -43,17 +89,6 @@ def init_session_state():
         st.session_state.voice_transcribed = None
     if "last_audio_data" not in st.session_state:
         st.session_state.last_audio_data = None
-    # Cognito authentication state
-    if "authenticated" not in st.session_state:
-        st.session_state.authenticated = False
-    if "username" not in st.session_state:
-        st.session_state.username = None
-    if "id_token" not in st.session_state:
-        st.session_state.id_token = None
-    if "access_token" not in st.session_state:
-        st.session_state.access_token = None
-    if "refresh_token" not in st.session_state:
-        st.session_state.refresh_token = None
     # Challenge state
     if "challenge_name" not in st.session_state:
         st.session_state.challenge_name = None
@@ -61,156 +96,289 @@ def init_session_state():
         st.session_state.challenge_session = None
     if "temp_username" not in st.session_state:
         st.session_state.temp_username = None
-
-
-def authenticate_user(username: str, password: str, cognito_client, client_id: str, user_pool_id: str, client_secret: str = None, use_admin_auth: bool = False):
-    """
-    Authenticate user with Cognito.
     
-    Args:
-        username: User's username
-        password: User's password
-        cognito_client: Boto3 Cognito IDP client
-        client_id: Cognito app client ID
-        user_pool_id: Cognito user pool ID
-        client_secret: Cognito app client secret (optional)
-        use_admin_auth: Use ADMIN_NO_SRP_AUTH flow instead of USER_PASSWORD_AUTH
-        
-    Returns:
-        Authentication result or None if failed
-    """
-    try:
-        if use_admin_auth:
-            # Use admin authentication (requires admin permissions)
-            auth_params = {
-                'USERNAME': username,
-                'PASSWORD': password
-            }
-            
-            if client_secret:
-                auth_params['SECRET_HASH'] = get_secret_hash(username, client_id, client_secret)
-            
-            response = cognito_client.admin_initiate_auth(
-                UserPoolId=user_pool_id,
-                ClientId=client_id,
-                AuthFlow='ADMIN_NO_SRP_AUTH',
-                AuthParameters=auth_params
-            )
+    # Cognito authentication state - restore from saved session if available
+    if "authenticated" not in st.session_state:
+        saved_session = load_auth_session()
+        if saved_session:
+            st.session_state.authenticated = True
+            st.session_state.username = saved_session["username"]
+            st.session_state.access_token = saved_session["access_token"]
+            st.session_state.id_token = saved_session["id_token"]
+            st.session_state.refresh_token = saved_session["refresh_token"]
         else:
-            # Use standard user authentication
+            st.session_state.authenticated = False
+            st.session_state.username = None
+            st.session_state.id_token = None
+            st.session_state.access_token = None
+            st.session_state.refresh_token = None
+
+
+# ==========================================================================
+# User Authentication Class
+class UserAuth:
+    """Handles all Cognito authentication operations."""
+    
+    def __init__(self, cognito_client, client_id: str, user_pool_id: str, client_secret: str = None):
+        """
+        Initialize UserAuth with Cognito configuration.
+        
+        Args:
+            cognito_client: Boto3 Cognito IDP client
+            client_id: Cognito app client ID
+            user_pool_id: Cognito user pool ID
+            client_secret: Cognito app client secret (optional)
+        """
+        self.cognito_client = cognito_client
+        self.client_id = client_id
+        self.user_pool_id = user_pool_id
+        self.client_secret = client_secret
+    
+    @staticmethod
+    def get_secret_hash(username: str, client_id: str, client_secret: str) -> str:
+        """Generate secret hash for Cognito authentication."""
+        message = bytes(username + client_id, 'utf-8')
+        secret = bytes(client_secret, 'utf-8')
+        dig = hmac.new(secret, msg=message, digestmod=hashlib.sha256).digest()
+        return base64.b64encode(dig).decode()
+    
+    def authenticate(self, username: str, password: str, use_admin_auth: bool = False):
+        """
+        Authenticate user with Cognito.
+        
+        Args:
+            username: User's username
+            password: User's password
+            use_admin_auth: Use ADMIN_NO_SRP_AUTH flow instead of USER_PASSWORD_AUTH
+            
+        Returns:
+            Authentication result or None if failed
+        """
+        try:
             auth_params = {
                 'USERNAME': username,
                 'PASSWORD': password
             }
             
-            if client_secret:
-                auth_params['SECRET_HASH'] = get_secret_hash(username, client_id, client_secret)
+            if self.client_secret:
+                auth_params['SECRET_HASH'] = self.get_secret_hash(
+                    username, self.client_id, self.client_secret
+                )
             
-            response = cognito_client.initiate_auth(
-                ClientId=client_id,
-                AuthFlow='USER_PASSWORD_AUTH',
+            if use_admin_auth:
+                response = self.cognito_client.admin_initiate_auth(
+                    UserPoolId=self.user_pool_id,
+                    ClientId=self.client_id,
+                    AuthFlow='ADMIN_NO_SRP_AUTH',
+                    AuthParameters=auth_params
+                )
+            else:
+                response = self.cognito_client.initiate_auth(
+                    ClientId=self.client_id,
+                    AuthFlow='USER_PASSWORD_AUTH',
+                    AuthParameters=auth_params
+                )
+            
+            return response
+        except Exception as e:
+            return None
+    
+    def respond_to_challenge(self, challenge_name: str, session: str, username: str, new_password: str):
+        """
+        Respond to authentication challenge.
+        
+        Args:
+            challenge_name: Name of the challenge
+            session: Challenge session token
+            username: User's username
+            new_password: New password for NEW_PASSWORD_REQUIRED challenge
+            
+        Returns:
+            Challenge response or None if failed
+        """
+        try:
+            challenge_responses = {
+                'USERNAME': username,
+                'NEW_PASSWORD': new_password
+            }
+            
+            if self.client_secret:
+                challenge_responses['SECRET_HASH'] = self.get_secret_hash(
+                    username, self.client_id, self.client_secret
+                )
+            
+            response = self.cognito_client.respond_to_auth_challenge(
+                ClientId=self.client_id,
+                ChallengeName=challenge_name,
+                Session=session,
+                ChallengeResponses=challenge_responses
+            )
+            
+            return response
+        except Exception as e:
+            import traceback
+            error_details = traceback.format_exc()
+            st.error(f"Challenge response failed: {str(e)}")
+            with st.expander("🔍 Debug Details"):
+                st.code(error_details)
+            return None
+    
+    def refresh_tokens(self, refresh_token: str, username: str):
+        """
+        Refresh authentication tokens.
+        
+        Args:
+            refresh_token: Refresh token
+            username: Username for secret hash generation
+            
+        Returns:
+            New tokens or None if failed
+        """
+        try:
+            auth_params = {
+                'REFRESH_TOKEN': refresh_token
+            }
+            
+            if self.client_secret:
+                auth_params['SECRET_HASH'] = self.get_secret_hash(
+                    username, self.client_id, self.client_secret
+                )
+            
+            response = self.cognito_client.initiate_auth(
+                ClientId=self.client_id,
+                AuthFlow='REFRESH_TOKEN_AUTH',
                 AuthParameters=auth_params
             )
-        
-        return response
-    except Exception as e:
-        return None
-
-
-def respond_to_auth_challenge(cognito_client, client_id: str, challenge_name: str, session: str, 
-                              username: str, new_password: str, client_secret: str = None):
-    """
-    Respond to authentication challenge.
+            
+            return response
+        except Exception as e:
+            st.error(f"Token refresh failed: {str(e)}")
+            return None
     
-    Args:
-        cognito_client: Boto3 Cognito IDP client
-        client_id: Cognito app client ID
-        challenge_name: Name of the challenge
-        session: Challenge session token
-        username: User's username
-        new_password: New password for NEW_PASSWORD_REQUIRED challenge
-        client_secret: Cognito app client secret (optional)
+    @staticmethod
+    def logout():
+        """Clear authentication state and logout user."""
+        st.session_state.authenticated = False
+        st.session_state.username = None
+        st.session_state.id_token = None
+        st.session_state.access_token = None
+        st.session_state.refresh_token = None
+        st.session_state.messages = []
+        st.session_state.session_id = str(uuid.uuid4())
         
-    Returns:
-        Challenge response or None if failed
-    """
-    try:
-        challenge_responses = {
-            'USERNAME': username,
-            'NEW_PASSWORD': new_password
-        }
-        
-        if client_secret:
-            challenge_responses['SECRET_HASH'] = get_secret_hash(username, client_id, client_secret)
-        
-        response = cognito_client.respond_to_auth_challenge(
-            ClientId=client_id,
-            ChallengeName=challenge_name,
-            Session=session,
-            ChallengeResponses=challenge_responses
-        )
-        
-        return response
-    except Exception as e:
-        import traceback
-        error_details = traceback.format_exc()
-        st.error(f"Challenge response failed: {str(e)}")
-        with st.expander("🔍 Debug Details"):
-            st.code(error_details)
-        return None
+        # Clear saved session
+        clear_auth_session()
 
 
-def refresh_tokens(cognito_client, client_id: str, refresh_token: str, client_secret: str = None):
-    """
-    Refresh authentication tokens.
-    
-    Args:
-        cognito_client: Boto3 Cognito IDP client
-        client_id: Cognito app client ID
-        refresh_token: Refresh token
-        client_secret: Cognito app client secret (optional)
-        
-    Returns:
-        New tokens or None if failed
-    """
-    try:
-        auth_params = {
-            'REFRESH_TOKEN': refresh_token
-        }
-        
-        if client_secret:
-            # For refresh, we need to use a dummy username for secret hash
-            auth_params['SECRET_HASH'] = get_secret_hash(st.session_state.username, client_id, client_secret)
-        
-        response = cognito_client.initiate_auth(
-            ClientId=client_id,
-            AuthFlow='REFRESH_TOKEN_AUTH',
-            AuthParameters=auth_params
-        )
-        
-        return response
-    except Exception as e:
-        st.error(f"Token refresh failed: {str(e)}")
-        return None
-
-
-def logout():
-    """Clear authentication state and logout user."""
-    st.session_state.authenticated = False
-    st.session_state.username = None
-    st.session_state.id_token = None
-    st.session_state.access_token = None
-    st.session_state.refresh_token = None
-    st.session_state.messages = []
-    st.session_state.session_id = str(uuid.uuid4())
-
-
-def display_message(role: str, content: str):
-    """Display a chat message."""
+# ==========================================================================
+# Other helper functions
+def display_message(role: str, content: str, thinking: list = None):
+    """Display a chat message with optional thinking process."""
     with st.chat_message(role):
+        # Show thinking process if available
+        if thinking and len(thinking) > 0:
+            with st.expander("🤔 Agent Thinking Process", expanded=False):
+                for thought in thinking:
+                    thought_type = thought.get("type", "unknown")
+                    thought_data = thought.get("data", "")
+                    
+                    if thought_type == "tool_use":
+                        st.info(f"🔧 **Using Tool**")
+                        st.code(thought_data, language="text")
+                    elif thought_type == "tool_result":
+                        st.success(f"✅ **Tool Result**")
+                        st.code(thought_data, language="text")
+                    elif thought_type == "thinking":
+                        st.write(f"🧠 {thought_data}")
+                    else:
+                        st.write(thought_data)
+        
+        # Show final answer
+        # Use st.markdown with unsafe_allow_html=True to render HTML elements like <details>
+        # This allows collapsible sections and other HTML formatting from the agent
         st.markdown(content, unsafe_allow_html=True)
 
 
+# ==========================================================================
+# Helper function to process and display agent response
+def process_agent_response(user_message: str, agent_arn: str, session_id: str, region: str, access_token: str = None):
+    """
+    Process agent response with streaming and display thinking + answer.
+    
+    Args:
+        user_message: The user's question
+        agent_arn: The ARN of the deployed AgentCore agent
+        session_id: The session ID for conversation continuity
+        region: AWS region
+        access_token: Cognito access token for Bearer authentication (optional)
+        
+    Returns:
+        Tuple of (answer_content, thinking_events) or (error_msg, None) on error
+    """
+    thinking_placeholder = st.empty()
+    answer_placeholder = st.empty()
+    status_placeholder = st.empty()
+    
+    thinking_events = []
+    answer_content = ""
+    
+    try:
+        # Show spinner with working message
+        with status_placeholder.status("Working...", expanded=False) as status:
+            st.write("Processing your request via AWS AgentCore...")
+            
+            # Stream response from AgentCore
+            for event in invoke_agentcore_agent(
+                user_message,
+                agent_arn,
+                session_id,
+                region,
+                access_token
+            ):
+                event_type = event.get("type", "content")
+                event_data = event.get("data", "")
+                
+                # Handle different event types
+                if event_type in ["thinking", "tool_use", "tool_result"]:
+                    thinking_events.append(event)
+                    
+                    # Show thinking in real-time
+                    with thinking_placeholder.expander("🤔 Agent Thinking Process", expanded=True):
+                        for thought in thinking_events:
+                                thought_type = thought.get("type")
+                                thought_data = thought.get("data", "")
+                                
+                                if thought_type == "tool_use":
+                                    st.info(f"🔧 **Using Tool**")
+                                    st.code(thought_data, language="text")
+                                elif thought_type == "tool_result":
+                                    st.success(f"✅ **Tool Result**")
+                                    st.code(thought_data, language="text")
+                                elif thought_type == "thinking":
+                                    st.write(f"🧠 {thought_data}")
+                else:
+                    # Content event - add to answer
+                    answer_content += event_data
+                    # Use markdown with unsafe_allow_html to render HTML elements
+                    answer_placeholder.markdown(answer_content + "▌", unsafe_allow_html=True)
+            
+            # Final answer without cursor
+            answer_placeholder.markdown(answer_content, unsafe_allow_html=True)
+        
+        # Clear status after completion
+        status_placeholder.empty()
+        
+        return answer_content, thinking_events if thinking_events else None
+        
+    except Exception as e:
+        status_placeholder.empty()
+        error_msg = f"❌ An error occurred: {str(e)}"
+        answer_placeholder.error(error_msg)
+        return error_msg, None
+
+
+# ==========================================================================
+# Helper function for AWS Transcribe functionality
 def transcribe_audio_with_aws(audio_bytes: bytes, region: str, s3_bucket: str) -> str:
     """
     Transcribe audio using AWS Transcribe.
@@ -296,10 +464,10 @@ def invoke_agentcore_agent(user_input: str, agent_arn: str, session_id: str, reg
         agent_arn: The ARN of the deployed AgentCore agent
         session_id: The session ID for conversation continuity
         region: AWS region
-        id_token: Cognito ID token for Bearer authentication (optional)
+        access_token: Cognito access token for Bearer authentication (optional)
         
     Yields:
-        Response chunks from the agent
+        Structured events: {"type": "thinking"|"content"|"tool_use"|"tool_result", "data": ...}
     """
     # Prepare the URL
     escaped_arn = urllib.parse.quote(agent_arn, safe="")
@@ -364,29 +532,38 @@ def invoke_agentcore_agent(user_input: str, agent_arn: str, session_id: str, reg
         response.raise_for_status()
         
         # Stream the response - parse Server-Sent Events format
+        current_event_type = None
         for line in response.iter_lines(chunk_size=1024, decode_unicode=True):
             if line:
-                # SSE format: "data: <content>"
-                if line.startswith("data: "):
+                # Parse event type
+                if line.startswith("event: "):
+                    current_event_type = line[7:].strip()
+                # Parse data
+                elif line.startswith("data: "):
                     data = line[6:].strip()
+                    
                     # Remove surrounding quotes and unescape JSON string
                     if data.startswith('"') and data.endswith('"'):
-                        # Use json.loads to properly unescape the JSON string
                         try:
                             data = json.loads(data)
                         except json.JSONDecodeError:
-                            # If it fails, just remove quotes manually
                             data = data[1:-1]
+                    
                     if data:
-                        yield data
+                        # Yield structured event
+                        yield {
+                            "type": current_event_type or "content",
+                            "data": data
+                        }
                     
     except requests.exceptions.RequestException as e:
         import traceback
         error_details = traceback.format_exc()
         raise Exception(f"Error invoking AgentCore agent: {str(e)}\n{error_details}")
 
-
-def show_login_page(cognito_client, client_id: str, user_pool_id: str, client_secret: str = None, use_admin_auth: bool = False):
+# ===========================================================================
+# Login Page UI
+def show_login_page(user_auth: UserAuth, use_admin_auth: bool = False):
     """Display login page."""
     
     # Check if we're in a challenge state
@@ -407,14 +584,11 @@ def show_login_page(cognito_client, client_id: str, user_pool_id: str, client_se
                     st.error("Passwords do not match")
                 else:
                     with st.spinner("Setting new password..."):
-                        result = respond_to_auth_challenge(
-                            cognito_client, 
-                            client_id, 
+                        result = user_auth.respond_to_challenge(
                             st.session_state.challenge_name,
                             st.session_state.challenge_session,
                             st.session_state.temp_username,
-                            new_password,
-                            client_secret
+                            new_password
                         )
                         
                         if result and 'AuthenticationResult' in result:
@@ -423,6 +597,15 @@ def show_login_page(cognito_client, client_id: str, user_pool_id: str, client_se
                             st.session_state.id_token = result['AuthenticationResult']['IdToken']
                             st.session_state.access_token = result['AuthenticationResult']['AccessToken']
                             st.session_state.refresh_token = result['AuthenticationResult'].get('RefreshToken')
+                            
+                            # Save session for persistence across page refreshes
+                            save_auth_session(
+                                st.session_state.username,
+                                st.session_state.id_token,
+                                st.session_state.access_token,
+                                st.session_state.refresh_token
+                            )
+                            
                             # Clear challenge state
                             st.session_state.challenge_name = None
                             st.session_state.challenge_session = None
@@ -455,7 +638,7 @@ def show_login_page(cognito_client, client_id: str, user_pool_id: str, client_se
                 st.error("Please enter both username and password")
             else:
                 with st.spinner("Authenticating..."):
-                    result = authenticate_user(username, password, cognito_client, client_id, user_pool_id, client_secret, use_admin_auth)
+                    result = user_auth.authenticate(username, password, use_admin_auth)
                     
                     if result:
                         if 'AuthenticationResult' in result:
@@ -464,6 +647,15 @@ def show_login_page(cognito_client, client_id: str, user_pool_id: str, client_se
                             st.session_state.id_token = result['AuthenticationResult']['IdToken']
                             st.session_state.access_token = result['AuthenticationResult']['AccessToken']
                             st.session_state.refresh_token = result['AuthenticationResult'].get('RefreshToken')
+                            
+                            # Save session for persistence across page refreshes
+                            save_auth_session(
+                                username,
+                                st.session_state.id_token,
+                                st.session_state.access_token,
+                                st.session_state.refresh_token
+                            )
+                            
                             st.success("✅ Login successful!")
                             time.sleep(0.5)
                             st.rerun()
@@ -489,7 +681,8 @@ def show_login_page(cognito_client, client_id: str, user_pool_id: str, client_se
     st.markdown("---")
     st.info("💡 If you don't have an account, please contact your administrator")
 
-
+# ===========================================================================
+# Main entry point for the UI
 def main():
     """Main Streamlit application."""
 
@@ -501,7 +694,7 @@ def main():
         layout="wide"
     )
     
-    # Initialize session state
+    # Initialize session state (will restore from saved session if available)
     init_session_state()
     
     # Get Cognito configuration from environment
@@ -516,12 +709,13 @@ def main():
         st.error("⚠️ Cognito configuration missing. Please set COGNITO_USER_POOL_ID and COGNITO_CLIENT_ID in .env file")
         st.stop()
     
-    # Initialize Cognito client
+    # Initialize Cognito client and UserAuth
     cognito_client = boto3.client('cognito-idp', region_name=aws_region)
+    user_auth = UserAuth(cognito_client, client_id, user_pool_id, client_secret)
     
     # Show login page if not authenticated
     if not st.session_state.authenticated:
-        show_login_page(cognito_client, client_id, user_pool_id, client_secret, use_admin_auth)
+        show_login_page(user_auth, use_admin_auth)
         return
     
     # Main application (authenticated users only)
@@ -544,7 +738,7 @@ def main():
         st.write(f"**Username:** {st.session_state.username}")
         
         if st.button("🚪 Logout", use_container_width=True, type="secondary"):
-            logout()
+            UserAuth.logout()
             st.rerun()
         
         st.markdown("---")
@@ -621,44 +815,29 @@ def main():
     
     # Display chat history
     for message in st.session_state.messages:
-        display_message(message["role"], message["content"])
+        thinking = message.get("thinking", None)
+        display_message(message["role"], message["content"], thinking)
     
     # Process last message if triggered by example button
     if st.session_state.process_last_message and st.session_state.messages:
         last_message = st.session_state.messages[-1]
         if last_message["role"] == "user":
             with st.chat_message("assistant"):
-                message_placeholder = st.empty()
-                status_placeholder = st.empty()
-                full_response = ""
+                answer_content, thinking_events = process_agent_response(
+                    last_message["content"],
+                    agent_arn,
+                    st.session_state.session_id,
+                    aws_region,
+                    st.session_state.access_token
+                )
                 
-                try:
-                    # Show spinner with working message
-                    with status_placeholder.status("Working...", expanded=False):
-                        st.write("Processing your request via AWS AgentCore...")
-                        
-                        # Stream response from AgentCore
-                        for chunk in invoke_agentcore_agent(
-                            last_message["content"],
-                            agent_arn,
-                            st.session_state.session_id,
-                            aws_region,
-                            st.session_state.access_token
-                        ):
-                            full_response += chunk
-                            message_placeholder.markdown(full_response + "▌", unsafe_allow_html=True)
-                        
-                        message_placeholder.markdown(full_response, unsafe_allow_html=True)
-                    
-                    # Clear status after completion
-                    status_placeholder.empty()
-                    st.session_state.messages.append({"role": "assistant", "content": full_response})
-                    
-                except Exception as e:
-                    status_placeholder.empty()
-                    error_msg = f"❌ An error occurred: {str(e)}"
-                    message_placeholder.error(error_msg)
-                    st.session_state.messages.append({"role": "assistant", "content": error_msg})
+                # Save message with thinking
+                st.session_state.messages.append({
+                    "role": "assistant",
+                    "content": answer_content,
+                    "thinking": thinking_events
+                })
+        
         st.session_state.process_last_message = False
     
     # Chat input
@@ -669,37 +848,20 @@ def main():
         
         # Get agent response with streaming
         with st.chat_message("assistant"):
-            message_placeholder = st.empty()
-            status_placeholder = st.empty()
-            full_response = ""
+            answer_content, thinking_events = process_agent_response(
+                prompt,
+                agent_arn,
+                st.session_state.session_id,
+                aws_region,
+                st.session_state.access_token
+            )
             
-            try:
-                # Show spinner with working message
-                with status_placeholder.status("Working...", expanded=False):
-                    st.write("Processing your request via AWS AgentCore...")
-                    
-                    # Stream response from AgentCore
-                    for chunk in invoke_agentcore_agent(
-                        prompt,
-                        agent_arn,
-                        st.session_state.session_id,
-                        aws_region,
-                        st.session_state.access_token
-                    ):
-                        full_response += chunk
-                        message_placeholder.markdown(full_response + "▌", unsafe_allow_html=True)
-                    
-                    message_placeholder.markdown(full_response, unsafe_allow_html=True)
-                
-                # Clear status after completion
-                status_placeholder.empty()
-                st.session_state.messages.append({"role": "assistant", "content": full_response})
-                
-            except Exception as e:
-                status_placeholder.empty()
-                error_msg = f"❌ An error occurred: {str(e)}"
-                message_placeholder.error(error_msg)
-                st.session_state.messages.append({"role": "assistant", "content": error_msg})
+            # Save message with thinking
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": answer_content,
+                "thinking": thinking_events
+            })
 
 
 if __name__ == "__main__":
