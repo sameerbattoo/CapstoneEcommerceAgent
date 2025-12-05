@@ -13,6 +13,7 @@ import jwt  # PyJWT
 
 from strands import Agent, tool
 from strands_tools import current_time
+from strands.models import BedrockModel
 
 # Import the 2 sub agents
 from agent import sql_agent
@@ -412,8 +413,21 @@ def initialize_agent_client(memory_config: AgentCoreMemoryConfig):
         # Create an Strands agent with our defined tools
         _all_tools = [get_default_questions, get_answers_for_structured_data, get_answers_for_unstructured_data, current_time]
         _all_tools += gateway_tools # Add the gateway tools
+
+        # Now define the Bedrock Model (we can include the reasoning flag here)
+        bedrock_model = BedrockModel(
+            model_id=BEDROCK_MODEL_ID,
+            additional_request_fields={
+                "thinking": {          # Bedrock rationales / reasoning config
+                    "type": "enabled", # or model-specific enum
+                    "budget_tokens": 4096,  # pick a value within model limits
+                }
+            },
+        )
+
+        # Now define the Strands Agent with the model, tools and system prompt from above
         _agent_client = Agent(
-            model=BEDROCK_MODEL_ID,
+            model=bedrock_model,
             tools=_all_tools,
             session_manager=AgentCoreMemorySessionManager(memory_config, AWS_REGION), # Reintroduced session_manager
             system_prompt=AGENT_SYSTEM_PROMPT
@@ -449,6 +463,17 @@ async def process_user_input(user_query: str, user_email: str) -> str:
         async for event in _agent_client.stream_async(user_query):
             if "data" in event:
                 yield event["data"]
+
+            #Yield tool use events for UI display
+            elif "current_tool_use" in event:
+                tool_use = event["current_tool_use"]
+                if tool_use.get("name"): # Only yield when tool name is aailable
+                    tool_info = f"Tool: {tool_use['name']}\nInput: {tool_use.get('input',{})}"
+                    yield f"\n[TOOL USE]{tool_info}\n"
+
+            #. Yield reasining/Thinking events for UI
+            elif "reasoning" in event and "reasoningText" in event:
+                yield f"\n[THINKING]{event['reasoningText']}\n"
 
         end_time = time.time()
         
