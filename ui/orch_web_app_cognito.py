@@ -315,66 +315,67 @@ def process_agent_response(user_message: str, agent_arn: str, session_id: str, r
     Returns:
         Tuple of (answer_content, thinking_events) or (error_msg, None) on error
     """
-    thinking_placeholder = st.empty()
+    # Create container for thinking process at the top
+    thinking_container = st.container()
     answer_placeholder = st.empty()
     status_placeholder = st.empty()
     
-    thinking_events = []
     answer_content = ""
+    tool_use_content = ""
+    thinking_content = ""
     
-    try:
-        # Show spinner with working message
-        with status_placeholder.status("Working...", expanded=False) as status:
-            st.write("Processing your request via AWS AgentCore...")
-            
-            # Stream response from AgentCore
-            for event in invoke_agentcore_agent(
-                user_message,
-                agent_arn,
-                session_id,
-                region,
-                access_token
-            ):
-                event_type = event.get("type", "content")
-                event_data = event.get("data", "")
-                
-                # Handle different event types
-                if event_type in ["thinking", "tool_use", "tool_result"]:
-                    thinking_events.append(event)
+    # Create the thinking expander at the start
+    with thinking_container:
+        thinking_expander = st.expander("🤔 Agent Thinking Process", expanded=False)
+        with thinking_expander:
+            thinking_placeholder = st.empty()
+            tool_use_placeholder = st.empty()
+
+            try:
+                # Show spinner with working message
+                with status_placeholder.status("Working...", expanded=False) as status:
+                    st.write("Processing your request via AWS AgentCore...")
                     
-                    # Show thinking in real-time
-                    with thinking_placeholder.expander("🤔 Agent Thinking Process", expanded=True):
-                        for thought in thinking_events:
-                                thought_type = thought.get("type")
-                                thought_data = thought.get("data", "")
-                                
-                                if thought_type == "tool_use":
-                                    st.info(f"🔧 **Using Tool**")
-                                    st.code(thought_data, language="text")
-                                elif thought_type == "tool_result":
-                                    st.success(f"✅ **Tool Result**")
-                                    st.code(thought_data, language="text")
-                                elif thought_type == "thinking":
-                                    st.write(f"🧠 {thought_data}")
-                else:
-                    # Content event - add to answer
-                    answer_content += event_data
-                    # Use markdown with unsafe_allow_html to render HTML elements
-                    answer_placeholder.markdown(answer_content + "▌", unsafe_allow_html=True)
-            
-            # Final answer without cursor
-            answer_placeholder.markdown(answer_content, unsafe_allow_html=True)
+                    # Stream response from AgentCore
+                    for event in invoke_agentcore_agent(
+                        user_message,
+                        agent_arn,
+                        session_id,
+                        region,
+                        access_token
+                    ):
+                        event_type = event.get("type", "content")
+                        event_data = event.get("data", "")
+
+                        # Handle different event types - update placeholders in real-time
+                        if event_type == "tool_use":
+                            tool_use_content = event_data
+                            tool_use_placeholder.code(tool_use_content)
+                            
+                        elif event_type == "thinking":
+                            thinking_content += event_data
+                            thinking_placeholder.info(thinking_content + "▌")
+                                                         
+                        else:
+                            # Content event - add to answer
+                            answer_content += event_data
+                            # Use markdown with unsafe_allow_html to render HTML elements
+                            answer_placeholder.markdown(answer_content + "▌", unsafe_allow_html=True)
+                    
+                    # Final answer without cursor
+                    thinking_placeholder.info(thinking_content)
+                    answer_placeholder.markdown(answer_content, unsafe_allow_html=True)
+                
+                # Clear status after completion
+                status_placeholder.empty()
         
-        # Clear status after completion
-        status_placeholder.empty()
+                return answer_content
         
-        return answer_content, thinking_events if thinking_events else None
-        
-    except Exception as e:
-        status_placeholder.empty()
-        error_msg = f"❌ An error occurred: {str(e)}"
-        answer_placeholder.error(error_msg)
-        return error_msg, None
+            except Exception as e:
+                status_placeholder.empty()
+                error_msg = f"❌ An error occurred: {str(e)}"
+                answer_placeholder.error(error_msg)
+                return error_msg, None
 
 
 # ==========================================================================
@@ -533,6 +534,8 @@ def invoke_agentcore_agent(user_input: str, agent_arn: str, session_id: str, reg
         
         # Stream the response - parse Server-Sent Events format
         current_event_type = None
+        buffer = ""  # Buffer to accumulate partial markers
+        
         for line in response.iter_lines(chunk_size=1024, decode_unicode=True):
             if line:
                 # Parse event type
@@ -548,17 +551,36 @@ def invoke_agentcore_agent(user_input: str, agent_arn: str, session_id: str, reg
                             data = json.loads(data)
                         except json.JSONDecodeError:
                             data = data[1:-1]
-                    
-                    if data:
-                        # Yield structured event
-                        yield {
-                            "type": current_event_type or "content",
-                            "data": data
-                        }
+
+                    if data: # Check to see ff there is data
+                        data_stripped = data.lstrip("\r\n")
+                        if data_stripped.startswith("[TOOL USE]"): # then its a tool_use message
+                            yield {"type": "tool_use", "data": data_stripped.removeprefix("[TOOL USE]")}
+                        elif data_stripped.startswith("[THINKING]"): # then its a thinking message
+                            yield {"type": "thinking", "data": data_stripped.removeprefix("[THINKING]")}
+                        else:
+                            yield {"type": "content", "data": data}
+
                     
     except requests.exceptions.RequestException as e:
         import traceback
         error_details = traceback.format_exc()
+        
+        # Check if it's a 401 Unauthorized error
+        if hasattr(e, 'response') and e.response is not None and e.response.status_code == 401:
+            # Clear authentication and force re-login
+            st.session_state.authenticated = False
+            st.session_state.username = None
+            st.session_state.id_token = None
+            st.session_state.access_token = None
+            st.session_state.refresh_token = None
+            clear_auth_session()
+            
+            # Show error message and rerun to show login page
+            st.error("🔒 Your session has expired. Please login again.")
+            time.sleep(2)
+            st.rerun()
+        
         raise Exception(f"Error invoking AgentCore agent: {str(e)}\n{error_details}")
 
 # ===========================================================================
@@ -823,19 +845,18 @@ def main():
         last_message = st.session_state.messages[-1]
         if last_message["role"] == "user":
             with st.chat_message("assistant"):
-                answer_content, thinking_events = process_agent_response(
+                answer_content = process_agent_response(
                     last_message["content"],
                     agent_arn,
                     st.session_state.session_id,
                     aws_region,
                     st.session_state.access_token
                 )
-                
+                             
                 # Save message with thinking
                 st.session_state.messages.append({
                     "role": "assistant",
-                    "content": answer_content,
-                    "thinking": thinking_events
+                    "content": answer_content
                 })
         
         st.session_state.process_last_message = False
@@ -848,7 +869,7 @@ def main():
         
         # Get agent response with streaming
         with st.chat_message("assistant"):
-            answer_content, thinking_events = process_agent_response(
+            answer_content = process_agent_response(
                 prompt,
                 agent_arn,
                 st.session_state.session_id,
@@ -856,11 +877,10 @@ def main():
                 st.session_state.access_token
             )
             
-            # Save message with thinking
+           # Save message with thinking
             st.session_state.messages.append({
                 "role": "assistant",
-                "content": answer_content,
-                "thinking": thinking_events
+                "content": answer_content
             })
 
 
