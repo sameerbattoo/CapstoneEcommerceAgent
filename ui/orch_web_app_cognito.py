@@ -470,7 +470,8 @@ def transcribe_audio_with_aws(audio_bytes: bytes, region: str, s3_bucket: str) -
             pass
         raise e
 
-
+# ==========================================================================
+# Helper function to call the agentcore API based on the access-token and return the streaming response
 def invoke_agentcore_agent(user_input: str, agent_arn: str, session_id: str, region: str, access_token: str = None):
     """
     Invoke the AWS Bedrock AgentCore agent and stream the response using requests.
@@ -778,15 +779,13 @@ def main():
             UserAuth.logout()
             st.rerun()
         
-        st.markdown("---")
+        # Clear chat button - moved here below Logout
+        if st.button("🗑️ Clear Chat", use_container_width=True, type="secondary"):
+            st.session_state.messages = []
+            st.session_state.session_id = str(uuid.uuid4())
+            st.rerun()
         
-        st.header("📊 About")
-        st.markdown("""       
-        This assistant connects to an AWS Bedrock AgentCore agent that intelligently routes your questions to:
-        - **Knowledge Base** for product specs
-        - **RDBMS Database** for orders and transactions
-        - **no-SQL Database** for product reviews
-        """)
+        st.markdown("---")
         
         # Voice input in sidebar
         st.header("🎤 Voice Input")
@@ -827,31 +826,14 @@ def main():
         
         st.markdown("---")
         
-        st.header("💡 Example Queries")
-        examples = [
-            "Its kinda cold today in California, what products can you suggest from your catalog?",
-            "I am planning to gift an Electronic item. Can you suggest the two 2 products in that category based on the reviews",
-            "List my orders along with the products in Feb 2025, how did others review these?",
-            "Show the distribution by product categories of my orders this year compared to last year",
-            "Display my review history with ratings. Did people find my reviews useful?",
-            "List the top 5 user by sales in 2025 and show their product review summary for each of them",
-            "Which customers have spent more than $1000 in the 2nd Quarter of 2025? Did they write any reviews?",
-            "What are the specifications of the Winter Jacket and also show the review sentiments",
-            "What colors are available for the Cotton T-Shirt and also how many people bought it in Q2 2025?",
-            "What other sample questions can I ask?",
-        ]
-        
-        for example in examples:
-            if st.button(example, key=f"ex_{example}", use_container_width=True):
-                st.session_state.messages.append({"role": "user", "content": example})
-                st.session_state.process_last_message = True
-                st.rerun()
-        
-        # Clear chat button
-        if st.button("🗑️ Clear Chat", use_container_width=True, type="secondary"):
-            st.session_state.messages = []
-            st.session_state.session_id = str(uuid.uuid4())
-            st.rerun()
+        # About section - moved here below Voice Input
+        st.header("📊 About")
+        st.markdown("""       
+        This assistant connects to an AWS Bedrock AgentCore agent that intelligently routes your questions to:
+        - **Knowledge Base** for product specs
+        - **RDBMS Database** for orders and transactions
+        - **no-SQL Database** for product reviews
+        """)
     
     # Display chat history
     for message in st.session_state.messages:
@@ -878,6 +860,150 @@ def main():
                 })
         
         st.session_state.process_last_message = False
+    
+    # Fixed bottom section with sample questions using CSS
+    st.markdown("""
+        <style>
+            /* Fixed bottom panel styling */
+            .fixed-bottom-section {
+                position: fixed;
+                bottom: 120px;
+                left: 0;
+                right: 0;
+                background: linear-gradient(to top, rgba(255,255,255,0.98) 0%, rgba(255,255,255,0.95) 100%);
+                backdrop-filter: blur(10px);
+                border-top: 2px solid #e0e0e0;
+                padding: 0.75rem 2rem;
+                z-index: 999;
+                box-shadow: 0 -4px 12px rgba(0,0,0,0.1);
+                max-height: 180px;
+                overflow-y: auto;
+            }
+            
+            /* Adjust main content to not be hidden by fixed panel */
+            .main .block-container {
+                padding-bottom: 320px !important;
+            }
+            
+            /* Style for the expander in fixed section */
+            .fixed-bottom-section .streamlit-expanderHeader {
+                background-color: transparent;
+                border: none;
+                font-weight: 600;
+                color: #333;
+                font-size: 0.95rem;
+                padding: 0.5rem 0;
+            }
+            
+            /* Horizontal scrollable container for buttons */
+            .fixed-bottom-section [data-testid="column"] {
+                overflow-x: auto;
+                white-space: nowrap;
+            }
+            
+            /* Button styling in fixed section - uniform size */
+            .fixed-bottom-section .stButton button {
+                margin-right: 0.5rem;
+                margin-bottom: 0.5rem;
+                border-radius: 20px;
+                padding: 0.4rem 0.75rem;
+                font-size: 0.525rem;
+                border: 1px solid #ddd;
+                background: white;
+                transition: all 0.3s ease;
+                white-space: nowrap;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                text-align: left;
+                line-height: 1.3;
+                height: 36px;
+                width: 100%;
+                display: block;
+            }
+            
+            .fixed-bottom-section .stButton button:hover {
+                background: #f0f2f6;
+                border-color: #FF4B4B;
+                transform: translateY(-2px);
+                box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+            }
+            
+            /* Scrollbar styling for fixed section */
+            .fixed-bottom-section::-webkit-scrollbar {
+                height: 6px;
+                width: 6px;
+            }
+            
+            .fixed-bottom-section::-webkit-scrollbar-track {
+                background: #f1f1f1;
+                border-radius: 3px;
+            }
+            
+            .fixed-bottom-section::-webkit-scrollbar-thumb {
+                background: #888;
+                border-radius: 3px;
+            }
+            
+            .fixed-bottom-section::-webkit-scrollbar-thumb:hover {
+                background: #555;
+            }
+            
+            /* Dark mode support */
+            @media (prefers-color-scheme: dark) {
+                .fixed-bottom-section {
+                    background: linear-gradient(to top, rgba(14,17,23,0.98) 0%, rgba(14,17,23,0.95) 100%);
+                    border-top-color: #4a4a4a;
+                }
+                .fixed-bottom-section .streamlit-expanderHeader {
+                    color: #fafafa;
+                }
+                .fixed-bottom-section .stButton button {
+                    background: #262730;
+                    border-color: #4a4a4a;
+                    color: #fafafa;
+                }
+                .fixed-bottom-section .stButton button:hover {
+                    background: #1e1e1e;
+                }
+            }
+        </style>
+    """, unsafe_allow_html=True)
+    
+    # Create a container for the fixed bottom section
+    bottom_container = st.container()
+    
+    with bottom_container:
+        st.markdown('<div class="fixed-bottom-section">', unsafe_allow_html=True)
+        
+        with st.expander("💡 Sample Questions - Click to try", expanded=True):
+            # Sample questions data
+            examples = [
+                "Its kinda cold today in California, what products can you suggest from your catalog?",
+                "I am planning to gift an Electronic item. Can you suggest the two 2 products in that category based on the reviews",
+                "List my orders along with the products in Feb 2025, how did others review these?",
+                "Show the distribution by product categories of my orders this year compared to last year",
+                "Display my review history with ratings. Did people find my reviews useful?",
+                "List the top 5 user by sales in 2025 and show their product review summary for each of them",
+                "Which customers have spent more than $1000 in the 2nd Quarter of 2025? Did they write any reviews?",
+                "What are the specifications of the Winter Jacket and also show the review sentiments",
+                "What colors are available for the Cotton T-Shirt and also how many people bought it in Q2 2025?",
+                "What other sample questions can I ask?",
+            ]
+            
+            # Create columns for horizontal layout
+            cols = st.columns(5)
+            for idx, example in enumerate(examples):
+                col_idx = idx % 5
+                with cols[col_idx]:
+                    # Truncate to exactly 60 characters with "..."
+                    display_text = example if len(example) <= 60 else example[:60] + "..."
+                    # Use help parameter to show full text as tooltip
+                    if st.button(display_text, key=f"bottom_ex_{idx}", help=example, use_container_width=True):
+                        st.session_state.messages.append({"role": "user", "content": example})
+                        st.session_state.process_last_message = True
+                        st.rerun()
+        
+        st.markdown('</div>', unsafe_allow_html=True)
     
     # Chat input
     if prompt := st.chat_input("Ask me anything about products, orders and reviews ..."):
