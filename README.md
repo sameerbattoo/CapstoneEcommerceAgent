@@ -19,7 +19,7 @@ This project implements a sophisticated e-commerce agent that can:
 
 1. **ECommerce Orchestrator Agent** (`main.py`)
    - Deployed on AWS Bedrock AgentCore Runtime
-   - Uses Claude 3.5 Sonnet LLM
+   - Uses Claude 4.5 Sonnet LLM
    - Orchestrates multiple tools and sub-agents
    - Runs in VPC with RDS access
 
@@ -183,21 +183,21 @@ cd lambda
 
 ```bash
 # Configure agent
-uv run agentcore configure \
-  -e main.py \
-  --vpc \
+uv run agentcore configure -e main.py --vpc \
   --subnets subnet-xxx,subnet-yyy \
   --security-groups sg-xxx \
   --name capstone_ecommerce_agent \
   --region us-west-2 \
   --execution-role arn:aws:iam::xxx:role/YourRole \
-  --disable-memory
-
-# Deploy
-uv run agentcore deploy
+  --disable-memory \
+  --authorizer-config '{"type":"customJWTAuthorizer","discoveryUrl":"https://cognito-idp.us-west-2.amazonaws.com/us-west-2_5xxx/.well-known/openid-configuration","allowedClients":"xyz"}' \
+  --request-header-allowlist Authorization,X-Amzn-Bedrock-AgentCore-Runtime-Custom-Session-Id \
+  --non-interactive
 
 # Launch
-uv run agentcore launch
+uv run agentcore launch \
+	--env AWS_REGION="us-west-2" \
+  --env AWS_SECRET_NAME="capstone-ecommerce-agent-config"
 ```
 
 ## Usage
@@ -205,13 +205,13 @@ uv run agentcore launch
 ### Run Streamlit UI (with Cognito)
 
 ```bash
-uv run streamlit run main_ui_cognito.py
+uv run main_ui_cognito.py
 ```
 
 ### Run Locally (without Cognito)
 
 ```bash
-uv run python main.py
+uv run streamlit run ./ui/orch_web_app_local.py
 ```
 
 ### Test Lambda Function
@@ -272,46 +272,6 @@ IAM permissions for:
 - AgentCore services
 - **AWS Secrets Manager** (for configuration retrieval)
 
-## Development
-
-### Local Testing
-
-```bash
-# Test orchestrator locally
-uv run python agent/orch_agent_local.py
-
-# Test SQL agent
-uv run python agent/sql_agent.py
-
-# Test KB agent
-uv run python agent/kb_agent.py
-```
-
-### Debugging
-
-Enable verbose logging:
-```python
-logging.basicConfig(level=logging.DEBUG)
-```
-
-Check AgentCore logs:
-```bash
-uv run agentcore logs
-```
-
-## Deployment
-
-### Update Agent
-
-```bash
-uv run agentcore deploy
-```
-
-### Destroy Agent
-
-```bash
-uv run agentcore destroy
-```
 
 ## Database Schema
 
