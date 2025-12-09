@@ -1,6 +1,6 @@
 # Standard library imports
 import logging
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 import time
 import json
 from datetime import datetime
@@ -59,7 +59,9 @@ logger = logging.getLogger("eCommerceAgent")
 
 
 #=====================================================================================
-# Helper class for - HTTPX Auth class that signs requests with AWS SigV4.
+# HELPER CLASSES
+#=====================================================================================
+
 class SigV4HTTPXAuth(httpx.Auth):
     """HTTPX Auth class that signs requests with AWS SigV4."""
 
@@ -97,68 +99,486 @@ class SigV4HTTPXAuth(httpx.Auth):
 
 
 #=====================================================================================
-# Function to get the list of all tools from a MCP Server
-def get_full_tools_list(client):
-    """Get all tools with pagination support"""
-    more_tools = True
-    tools = []
-    pagination_token = None
-    while more_tools:
-        tmp_tools = client.list_tools_sync(pagination_token=pagination_token)
-        tools.extend(tmp_tools)
-        if tmp_tools.pagination_token is None:
-            more_tools = False
-        else:
+# MAIN CLASSES
+#=====================================================================================
+
+class AgentManager:
+    """Manages all agent instances with lazy loading."""
+    
+    def __init__(self, logger: logging.Logger, config: Dict[str, Any]):
+        """
+        Initialize the AgentManager.
+        
+        Args:
+            logger: Logger instance
+            config: Configuration dictionary with AWS settings, DB config, etc.
+        """
+        self.logger = logger
+        self.config = config
+        
+        # Agent instances (lazy loaded)
+        self._sql_agent = None
+        self._kb_agent = None
+        self._mcp_client = None
+        self._orchestrator_agent = None
+        self._mcp_session_active = False
+    
+    @property
+    def sql_agent(self):
+        """Lazy initialization of SQL agent."""
+        if self._sql_agent is None:
+            self.logger.info("Initializing SQL agent client...")
+            self._sql_agent = sql_agent.SQLAgent(
+                self.logger,
+                self.config['db_config'],
+                self.config['aws_region'],
+                self.config['bedrock_model_id']
+            )
+        return self._sql_agent
+    
+    @property
+    def kb_agent(self):
+        """Lazy initialization of KB agent."""
+        if self._kb_agent is None:
+            self.logger.info("Initializing KB agent client...")
+            self._kb_agent = kb_agent.KnowledgeBaseAgent(
+                self.logger,
+                self.config['kb_id'],
+                self.config['aws_region'],
+                self.config['bedrock_model_arn']
+            )
+        return self._kb_agent
+    
+    @property
+    def mcp_client(self):
+        """Lazy initialization of MCP client."""
+        if self._mcp_client is None:
+            self._initialize_mcp_client()
+        return self._mcp_client
+    
+    def _initialize_mcp_client(self) -> None:
+        """Initialize MCP client with SigV4 authentication."""
+        if self.config.get('gateway_url') is None:
+            self.logger.warning("Gateway URL not configured, MCP client will not be initialized")
+            return
+        
+        self.logger.info("Initializing MCP client...")
+        credentials = Session().get_credentials()
+        auth = SigV4HTTPXAuth(credentials, "bedrock-agentcore", self.config['aws_region'])
+        transport_factory = lambda: streamablehttp_client(url=self.config['gateway_url'], auth=auth)
+        self._mcp_client = MCPClient(transport_factory)
+    
+    def _get_mcp_tools(self) -> List:
+        """Get all tools from MCP server with pagination support."""
+        if self._mcp_client is None:
+            return []
+        
+        try:
+            tools = []
+            pagination_token = None
             more_tools = True
-            pagination_token = tmp_tools.pagination_token
-
-    return tools
-
-#=====================================================================================
-# Generic Function to validate environment variables and return the value
-def validate_and_set_env_variable(env_variable: str) -> str:
-    env_variable_val = os.getenv(env_variable)
+            
+            while more_tools:
+                tmp_tools = self._mcp_client.list_tools_sync(pagination_token=pagination_token)
+                tools.extend(tmp_tools)
+                
+                if tmp_tools.pagination_token is None:
+                    more_tools = False
+                else:
+                    pagination_token = tmp_tools.pagination_token
+            
+            self.logger.info(f"Successfully loaded {len(tools)} tools from Gateway")
+            return tools
+        except Exception as e:
+            self.logger.error(f"Error loading tools from Gateway: {str(e)}")
+            return []
     
-    if env_variable_val is None:
-        logger.error(f"{env_variable} not found in environment variables.")
-        raise ValueError(f"{env_variable} environment variable is required")
+    def _build_system_prompt(self, max_sql_rows: int, max_dynamo_rows: int) -> str:
+        """Build the system prompt for the orchestrator agent."""
+        return f"""
+You are an intelligent E-commerce Assistant Agent designed to help users with queries related to products, orders and reviews. 
 
-    return env_variable_val
+You are a orchestrator agent which has access to the following tools:
+- get_default_questions: for listing the sample questions that the user can ask related to products and orders.
+- get_answers_for_structured_data: for any queries related to Transactional Data, this tool already has the capability to generate SQL based on user query and execute and get the formatted results.
+- get_answers_for_unstructured_data: for any query related to Product Knowledge Base, this toll already has the capability to query the knowledgebase based on user query and get the formatted results.
+- ProductReviewLambda___get_product_reviews: for any queries related to product reviews and sentiments.
+- current_time: for current time infomation.
 
-#=====================================================================================
-# Helper function to Load configuration from AWS Secrets Manager
-def load_secrets_from_aws() -> bool:
-    """Load configuration from AWS Secrets Manager"""
-    import boto3
-    from botocore.exceptions import ClientError
+Your responsibilities:
+- Categorize the user query and find out which of the above listed tools can answer the question.
+- If the user question is unrelated then gracefully let the user with reasons of which the question can be answered.
+- Else, call the specific tool 
+- Remember the tools produce formatted results, please convert it to markdown so that it can be displayed on the frontend.
+- When the tool - get_answers_for_structured_data is called,
+    1) Show the Tabular data first, in a nicely formated tabular grid. Merge the column values while displaying if the data is grouped by a column. Show a max of {max_sql_rows} rows in the table and show the row_count.
+    2) Based on the tabular data, if possible, show a graphical representation of the data. 
+    3) Then Show the Key Insights, and please make it brief and concise
+    4) Then if there is a SQL statement, show the generate SQL at the end within <details> tag.
+- When the tool - get_answers_for_unstructured_data is called, show the sources and the preview at the end within <details> tag.
+- When the tool - ProductReviewLambda___get_product_reviews is called, 
+    1) pass the related product_id(s), customer_id(s), product_name(s), customer_name(s), top_rows and review_date range based on the user query. 
+    2) Show a max of {max_dynamo_rows} rows in the table and show the total row count.
+    3) Please collect all these tool calls and display them at the end within <details> tag.
+
+Remember previous context from the conversation when responding.
+
+IMPORTANT: When thinking about how to answer the users question or using tools, please:
+1. Provide text output to the user, this helps users understand your reasoning process while waiting.
+2. Then provide your final answer
+3. When providing the finaly answer keep the summary / insights crisp and short.
+"""
     
-    load_dotenv() # Get the AWS_SECRET_NAME & AWS_REGION from env, override the rest from Secrets Manager
-    secret_name = os.getenv("AWS_SECRET_NAME", AWS_SECRET_NAME)
-    region_name = os.getenv("AWS_REGION", "us-west-2")  # Fallback to env or default
-    
-    try:
-        session = boto3.session.Session()
-        client = session.client(
-            service_name='secretsmanager',
-            region_name=region_name
+    def initialize_orchestrator(
+        self,
+        memory_config: AgentCoreMemoryConfig,
+        max_sql_rows: int,
+        max_dynamo_rows: int
+    ) -> None:
+        """
+        Initialize the orchestrator agent with tools and configuration.
+        
+        Args:
+            memory_config: AgentCore memory configuration
+            max_sql_rows: Maximum rows to display for SQL results
+            max_dynamo_rows: Maximum rows to display for DynamoDB results
+        """
+        if self._orchestrator_agent is not None:
+            self.logger.info("Orchestrator agent already initialized")
+            return
+        
+        self.logger.info("Initializing orchestrator agent...")
+        
+        # Load gateway tools if MCP client is available
+        gateway_tools = []
+        if self.config.get('gateway_url'):
+            # Initialize and start MCP client session
+            _ = self.mcp_client  # Trigger lazy loading
+            if self._mcp_client:
+                self._mcp_client.__enter__()
+                self._mcp_session_active = True
+                gateway_tools = self._get_mcp_tools()
+        
+        # Collect all tools
+        all_tools = [
+            get_default_questions,
+            get_answers_for_structured_data,
+            get_answers_for_unstructured_data,
+            current_time
+        ]
+        all_tools += gateway_tools
+        
+        # Build system prompt
+        system_prompt = self._build_system_prompt(max_sql_rows, max_dynamo_rows)
+        
+        # Create Bedrock model with reasoning
+        bedrock_model = BedrockModel(
+            model_id=self.config['bedrock_model_id'],
+            additional_request_fields={
+                "thinking": {
+                    "type": "enabled",
+                    "budget_tokens": 8000,
+                }
+            },
         )
         
-        get_secret_value_response = client.get_secret_value(SecretId=secret_name)
-        secret = json.loads(get_secret_value_response['SecretString'])
+        # Create the orchestrator agent
+        self._orchestrator_agent = Agent(
+            model=bedrock_model,
+            tools=all_tools,
+            session_manager=AgentCoreMemorySessionManager(memory_config, self.config['aws_region']),
+            system_prompt=system_prompt
+        )
         
-        # Set environment variables from secret
-        for key, value in secret.items():
-            os.environ[key] = str(value)
+        self.logger.info("Orchestrator agent initialized successfully")
+    
+    @property
+    def orchestrator(self) -> Optional[Agent]:
+        """Get the orchestrator agent."""
+        return self._orchestrator_agent
+    
+    def cleanup(self) -> None:
+        """Clean up resources."""
+        if self._mcp_client and self._mcp_session_active:
+            try:
+                self._mcp_client.__exit__(None, None, None)
+                self._mcp_session_active = False
+                self.logger.info("MCP client session closed")
+            except Exception as e:
+                self.logger.error(f"Error closing MCP client session: {str(e)}")
+
+
+class ECommerceAgentApplication:
+    """Main application orchestrator that handles configuration and request processing."""
+    
+    def __init__(self, logger: logging.Logger):
+        """
+        Initialize the ECommerceAgentApplication.
         
-        logger.info(f"Successfully loaded {len(secret)} configuration values from Secrets Manager")
-        return True
+        Args:
+            logger: Logger instance
+        """
+        self.logger = logger
+        self.config = {}
+        self.agent_manager = None
         
-    except ClientError as e:
-        logger.error(f"Error loading secrets from AWS Secrets Manager: {str(e)}")
-        logger.info("Falling back to .env file")
-        return False
+        # Constants
+        self.MAX_ROWS_FOR_SQL_RESULT_DISPLAY = 20
+        self.MAX_ROWS_FOR_DYNAMODB_RESULT_DISPLAY = 5
+    
+    def load_configuration(self) -> None:
+        """Load configuration from AWS Secrets Manager or .env file."""
+        self.logger.info("Loading configuration...")
+        
+        # Try loading from AWS Secrets Manager
+        if not self._load_secrets_from_aws():
+            self.logger.info("Loading from .env file")
+            load_dotenv()
+        
+        # Validate and set required environment variables
+        self.config = {
+            'aws_region': self._validate_env_var("AWS_REGION"),
+            'bedrock_model_id': self._validate_env_var("BEDROCK_MODEL_ID"),
+            'bedrock_model_arn': self._validate_env_var("BEDROCK_MODEL_ARN"),
+            'kb_id': self._validate_env_var("KB_ID"),
+            'agentcore_memory_id': self._validate_env_var("AGENTCORE_MEMORY_ID"),
+            'db_config': {
+                "host": self._validate_env_var("DB_HOST"),
+                "port": self._validate_env_var("DB_PORT"),
+                "database": self._validate_env_var("DB_NAME"),
+                "user": self._validate_env_var("DB_USER"),
+                "password": self._validate_env_var("DB_PASSWORD")
+            },
+            'gateway_url': os.getenv("GATEWAY_URL")
+        }
+        
+        # Initialize agent manager
+        self.agent_manager = AgentManager(self.logger, self.config)
+        
+        self.logger.info("Configuration loaded successfully")
+    
+    def _load_secrets_from_aws(self) -> bool:
+        """Load configuration from AWS Secrets Manager."""
+        import boto3
+        from botocore.exceptions import ClientError
+        
+        load_dotenv()
+        secret_name = os.getenv("AWS_SECRET_NAME", AWS_SECRET_NAME)
+        region_name = os.getenv("AWS_REGION", "us-west-2")
+        
+        try:
+            session = boto3.session.Session()
+            client = session.client(
+                service_name='secretsmanager',
+                region_name=region_name
+            )
+            
+            get_secret_value_response = client.get_secret_value(SecretId=secret_name)
+            secret = json.loads(get_secret_value_response['SecretString'])
+            
+            for key, value in secret.items():
+                os.environ[key] = str(value)
+            
+            self.logger.info(f"Successfully loaded {len(secret)} configuration values from Secrets Manager")
+            return True
+            
+        except ClientError as e:
+            self.logger.error(f"Error loading secrets from AWS Secrets Manager: {str(e)}")
+            self.logger.info("Falling back to .env file")
+            return False
+    
+    def _validate_env_var(self, env_variable: str) -> str:
+        """Validate and return environment variable value."""
+        env_variable_val = os.getenv(env_variable)
+        
+        if env_variable_val is None:
+            self.logger.error(f"{env_variable} not found in environment variables.")
+            raise ValueError(f"{env_variable} environment variable is required")
+        
+        return env_variable_val
+    
+    def _extract_session_id(self, headers: Optional[Dict], payload: Dict) -> str:
+        """Extract or generate session ID."""
+        if headers and 'X-Amzn-Bedrock-AgentCore-Runtime-Session-Id' in headers:
+            return headers.get('X-Amzn-Bedrock-AgentCore-Runtime-Session-Id')
+        elif payload and 'session_id' in payload:
+            return payload.get('session_id')
+        else:
+            return str(uuid.uuid4())
+    
+    def _extract_user_context(self, headers: Optional[Dict]) -> Tuple[Optional[str], str]:
+        """
+        Extract user email and actor_id from request headers.
+        
+        Args:
+            headers: Request headers containing Authorization token
+            
+        Returns:
+            Tuple of (user_email, actor_id)
+        """
+        user_email = None
+        actor_id = 'user'  # Default actor
+        
+        if not headers:
+            return user_email, actor_id
+        
+        # Check for custom actor ID header
+        if 'X-Amzn-Bedrock-AgentCore-Runtime-Custom-Actor-Id' in headers:
+            actor_id = headers.get('X-Amzn-Bedrock-AgentCore-Runtime-Custom-Actor-Id')
+        
+        # Try to extract from JWT token
+        auth_header = headers.get("Authorization")
+        if auth_header:
+            try:
+                token = auth_header.replace("Bearer ", "") if auth_header.startswith("Bearer ") else auth_header
+                claims = jwt.decode(token, options={"verify_signature": False, "verify_aud": False})
+                
+                username = claims.get("username")
+                if username:
+                    user_email = f"{username}@email.com"
+                    actor_id = user_email.replace(".", "_").replace("@", "-")
+                    self.logger.info(f"Extracted user context: email={user_email}, actor_id={actor_id}")
+            except Exception as e:
+                self.logger.warning(f"Failed to parse JWT token: {str(e)}")
+        
+        return user_email, actor_id
+    
+    def _build_memory_config(self, session_id: str, actor_id: str) -> AgentCoreMemoryConfig:
+        """Build AgentCore memory configuration."""
+        return AgentCoreMemoryConfig(
+            memory_id=self.config['agentcore_memory_id'],
+            session_id=session_id,
+            actor_id=actor_id,
+            retrieval_config={
+                f"/users/{actor_id}/facts": RetrievalConfig(top_k=5, relevance_score=0.5),
+                f"/users/{actor_id}/preferences": RetrievalConfig(top_k=5, relevance_score=0.5)
+            }
+        )
+    
+    def _add_user_context_filter(self, user_query: str, user_email: Optional[str]) -> str:
+        """Add user context filtering to the query."""
+        if not user_email:
+            return user_query
+        
+        context_filter = f""". 
+Also,
+    If the above query results in a call to the get_answers_for_structured_data tool and the query mentions my orders or my products or my shipments, 
+    - then, if possible, add a WHERE clause to filter the data by customers.email='{user_email}'.
+    If the above query results in a call to the ProductReviewLambda___get_product_reviews tool and the query mentions my reviews,
+    - then, filter product review data by passing the current user: {user_email} as customer_id parameter.
+"""
+        return user_query + context_filter
+    
+    async def process_and_stream(self, user_query: str, user_email: Optional[str]):
+        """
+        Process user input and stream responses.
+        
+        Args:
+            user_query: The user's question or request
+            user_email: The email address of the current logged-in user
+            
+        Yields:
+            Streaming response chunks, tool use events, and thinking events
+        """
+        log_conversation("User", f"user_query: {user_query}, user_email: {user_email}")
+        
+        if not self.agent_manager.orchestrator:
+            yield "Agent not initialized. Please try again."
+            return
+        
+        try:
+            start_time = time.time()
+            
+            # Add user context filtering
+            enhanced_query = self._add_user_context_filter(user_query, user_email)
+            
+            # Stream responses from the agent
+            async for event in self.agent_manager.orchestrator.stream_async(enhanced_query):
+                if "data" in event:
+                    yield event["data"]
+                
+                # Yield tool use events for UI display
+                elif "current_tool_use" in event:
+                    tool_use = event["current_tool_use"]
+                    if tool_use.get("name"):
+                        tool_info = f"Tool: {tool_use['name']}\nInput: {tool_use.get('input', {})}"
+                        yield f"\n[TOOL USE]{tool_info}\n"
+                
+                # Yield reasoning/thinking events for UI
+                elif "reasoning" in event and "reasoningText" in event:
+                    yield f"\n[THINKING]{event['reasoningText']}\n"
+            
+            end_time = time.time()
+            self.logger.info(f"Request processed in {end_time - start_time:.2f} seconds")
+            
+        except Exception as e:
+            error_msg = f"Error processing request: {str(e)}"
+            self.logger.error(error_msg)
+            yield f"I'm sorry, I encountered an error: {str(e)}. Please try again later."
+    
+    async def handle_request(self, payload: Dict[str, Any], context: Any):
+        """
+        Main entry point for handling requests.
+        
+        Args:
+            payload: Request payload containing user_input
+            context: Request context with headers
+            
+        Yields:
+            Streaming response chunks
+        """
+        self.logger.info(f"Received payload: {payload}")
+        
+        try:
+            # Extract user input
+            user_input = payload.get("user_input")
+            if not user_input:
+                self.logger.error("No 'user_input' key found in payload")
+                yield "No user_input provided in payload."
+                return
+            
+            # Extract headers
+            headers = context.request_headers if hasattr(context, 'request_headers') else None
+            
+            # Get session and user context
+            session_id = self._extract_session_id(headers, payload)
+            user_email, actor_id = self._extract_user_context(headers)
+            
+            self.logger.info(f"Processing - user_input: {user_input}, session_id: {session_id}, actor_id: {actor_id}, user_email: {user_email}")
+            self.logger.info("\n🚀 Processing request...")
+            
+            # Build memory configuration
+            memory_config = self._build_memory_config(session_id, actor_id)
+            
+            # Initialize orchestrator with memory config
+            self.agent_manager.initialize_orchestrator(
+                memory_config,
+                self.MAX_ROWS_FOR_SQL_RESULT_DISPLAY,
+                self.MAX_ROWS_FOR_DYNAMODB_RESULT_DISPLAY
+            )
+            
+            # Process the request and stream responses
+            async for chunk in self.process_and_stream(user_input, user_email):
+                self.logger.info(f"Streaming chunk: {chunk[:50]}..." if len(str(chunk)) > 50 else f"Streaming chunk: {chunk}")
+                yield chunk
+        
+        except Exception as e:
+            error_msg = f"Error in handle_request: {str(e)}"
+            self.logger.error(error_msg)
+            self.logger.info(f"\n❌ {error_msg}")
+            yield f"I'm sorry, I encountered an error: {str(e)}. Please try again later."
+    
+    def cleanup(self) -> None:
+        """Clean up application resources."""
+        self.logger.info("Cleaning up application resources...")
+        if self.agent_manager:
+            self.agent_manager.cleanup()
+
 
 #=====================================================================================
+# UTILITY FUNCTIONS
+#=====================================================================================
+
 def log_conversation(role: str, content: str, tool_calls: Optional[List] = None) -> None:
     """Log each conversation turn with timestamp and optional tool calls"""
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -168,81 +588,31 @@ def log_conversation(role: str, content: str, tool_calls: Optional[List] = None)
         for call in tool_calls:
             logger.info(f"  Tool used: {call['name']} with args: {json.dumps(call['args'])}")
 
+
 #=====================================================================================
-# Initialize the agent
+# GLOBAL APPLICATION INSTANCE
 #=====================================================================================
+
 # ADDED: BEDROCK_AGENTCORE APP CREATION
 app = BedrockAgentCoreApp()
 
-# Load environment variables from AWS Secrets Manager (with .env fallback)
-load_secrets_from_aws()
+# Global application instance (initialized on first request)
+_app_instance: Optional[ECommerceAgentApplication] = None
 
-# Set - AWS Region, Model ID and ARN, KB ID from environment variables
-AWS_REGION = validate_and_set_env_variable("AWS_REGION")
-BEDROCK_MODEL_ID = validate_and_set_env_variable("BEDROCK_MODEL_ID")
-BEDROCK_MODEL_ARN = validate_and_set_env_variable("BEDROCK_MODEL_ARN")
-KB_ID = validate_and_set_env_variable("KB_ID")
-DB_CONFIG = {
-            "host": validate_and_set_env_variable("DB_HOST"),
-            "port": validate_and_set_env_variable("DB_PORT"),
-            "database": validate_and_set_env_variable("DB_NAME"),
-            "user": validate_and_set_env_variable("DB_USER"),
-            "password": validate_and_set_env_variable("DB_PASSWORD")
-        }
 
-# ADDED: BEDROCK_AGENTCORE Memory
-AGENTCORE_MEMORY_ID = validate_and_set_env_variable("AGENTCORE_MEMORY_ID")
+def get_app_instance() -> ECommerceAgentApplication:
+    """Get or create the application instance."""
+    global _app_instance
+    if _app_instance is None:
+        _app_instance = ECommerceAgentApplication(logger)
+        _app_instance.load_configuration()
+    return _app_instance
 
-# (AgentCore) Gateway URL (this is the gateway which provides acess product reviews via the lambda function)
-GATEWAY_URL = os.getenv("GATEWAY_URL")
-
-# Define constants
-MAX_ROWS_FOR_SQL_RESULT_DISPLAY = 20
-MAX_ROWS_FOR_DYNAMODB_RESULT_DISPLAY = 5
-
-# Global variables for lazy initialization
-_sql_agent_client = None    # for SQL Agent
-_kb_agent_client = None     # for KB Agent
-_dynamodb_mcp_client = None # for MCP client
-_agent_client = None        # for the orchestrator Agent
 
 #=====================================================================================
-# Helper functions to enable lazy loading of various tools
-def get_sql_agent_client():
-    """Lazy initialization of SQL agent client"""
-    global _sql_agent_client
-
-    if _sql_agent_client is None:
-        logger.info("Initializing SQL agent client...")
-        _sql_agent_client = sql_agent.SQLAgent(logger, DB_CONFIG, AWS_REGION, BEDROCK_MODEL_ID)
-    
-    return _sql_agent_client
-
-def get_kb_agent_client():
-    """Lazy initialization of KB agent client"""
-    global _kb_agent_client
-
-    if _kb_agent_client is None:
-        logger.info("Initializing KB agent client...")
-        _kb_agent_client = kb_agent.KnowledgeBaseAgent(logger, KB_ID, AWS_REGION, BEDROCK_MODEL_ARN)
-    
-    return _kb_agent_client
-
-def initialize_mcp_client():
-    """Lazy initialization of MCP client"""
-    global _dynamodb_mcp_client
-
-    if _dynamodb_mcp_client is None:
-        logger.info("Initializing MCP client...")
-
-        credentials = Session().get_credentials()
-        auth = SigV4HTTPXAuth(credentials, "bedrock-agentcore", AWS_REGION)
-        transport_factory = lambda: streamablehttp_client(url=GATEWAY_URL, auth=auth)
-        _dynamodb_mcp_client = MCPClient(transport_factory)
+# TOOL DEFINITIONS
 #=====================================================================================
 
-#=====================================================================================
-# Worker Agent A: Data retrieval agent for Structured data sored in RDS
 @tool
 def get_answers_for_structured_data(user_query: str) -> Dict[str, Any]:
     """
@@ -254,27 +624,21 @@ def get_answers_for_structured_data(user_query: str) -> Dict[str, Any]:
     Returns:
         Detailed answers which is formatted to the user question
     """
-
     log_conversation("User", f"user_query: {user_query}")
 
     try:
         start_time = time.time()
-        # Call the agent and return its response
-        response = get_sql_agent_client().process_query(user_query)
-        
+        app_instance = get_app_instance()
+        response = app_instance.agent_manager.sql_agent.process_query(user_query)
         end_time = time.time()
         logger.info(f"Request processed in {end_time - start_time:.2f} seconds in the structured assistant")
-
         return response
 
     except Exception as e:
         logger.error(f"Error processing request in the structured assistant: {str(e)}")
-        # Return a graceful error response
         return {"message": {"content": f"I'm sorry, I encountered an error in the structured assistant: {str(e)}. Please try again later."}}
-#=====================================================================================
 
-#=====================================================================================
-# Worker Agent B: Data retrieval agent for Un-Structured data sored in Bedrock KB
+
 @tool
 def get_answers_for_unstructured_data(user_query: str) -> Dict[str, Any]:
     """
@@ -286,26 +650,21 @@ def get_answers_for_unstructured_data(user_query: str) -> Dict[str, Any]:
     Returns:
         Detailed answers which is formatted to the user question
     """
-
     log_conversation("User", user_query)
 
     try:
         start_time = time.time()
-        # Call the agent and return its response
-        response = get_kb_agent_client().process_query(user_query)
-        
+        app_instance = get_app_instance()
+        response = app_instance.agent_manager.kb_agent.process_query(user_query)
         end_time = time.time()
         logger.info(f"Request processed in {end_time - start_time:.2f} seconds in the unstructured assistant")
-
         return response
 
     except Exception as e:
         logger.error(f"Error processing request in the unstructured assistant: {str(e)}")
-        # Return a graceful error response
         return {"message": {"content": f"I'm sorry, I encountered an error in the unstructured assistant: {str(e)}. Please try again later."}}
-#=====================================================================================
 
-#=====================================================================================
+
 @tool
 def get_default_questions(user_query: str) -> Dict[str, Any]:
     """
@@ -317,252 +676,72 @@ def get_default_questions(user_query: str) -> Dict[str, Any]:
     Returns:
         Detailed answers which is formatted to the user question
     """
-
     log_conversation("User", user_query)
     
     try:
-        
         start_time = time.time()
+        app_instance = get_app_instance()
 
         response = (
             "Questions related to Order and Products transactional data in natural language \n"
             "Examples:\n"
         )
 
-        # Call the agent and return its response
-        for question in get_sql_agent_client().get_sample_questions():
+        for question in app_instance.agent_manager.sql_agent.get_sample_questions():
             response += f"  • {question}\n"
 
         response += (
             "\n\n, Questions related to Products based on the product specifications \n"
             "Examples:\n"
         )
-        for question in get_kb_agent_client().get_sample_questions():
+        for question in app_instance.agent_manager.kb_agent.get_sample_questions():
             response += f"  • {question}\n"
         
         end_time = time.time()
-        logger.info(f"Request processed in {end_time - start_time:.2f} seconds in the structured assistant")
+        logger.info(f"Request processed in {end_time - start_time:.2f} seconds")
 
         return response
 
     except Exception as e:
         logger.error(f"Error processing request in the assistant: {str(e)}")
-        # Return a graceful error response
         return {"message": {"content": f"I'm sorry, I encountered an error in the assistant: {str(e)}. Please try again later."}}
-#=====================================================================================
 
 
 #=====================================================================================
-def initialize_agent_client(memory_config: AgentCoreMemoryConfig):
-    """Lazy initialization of orch agent client"""
-    global _agent_client
-    global _dynamodb_mcp_client
-
-    # System prompt for the eCommerce orchestrator agent
-    AGENT_SYSTEM_PROMPT = f"""
-    You are an intelligent E-commerce Assistant Agent designed to help users with queries related to products, orders and reviews. 
-
-    You are a orchestrator agent which has access to the following tools:
-    - get_default_questions: for listing the sample questions that the user can ask related to products and orders.
-    - get_answers_for_structured_data: for any queries related to Transactional Data, this tool already has the capability to generate SQL based on user query and execute and get the formatted results.
-    - get_answers_for_unstructured_data: for any query related to Product Knowledge Base, this toll already has the capability to query the knowledgebase based on user query and get the formatted results.
-    - ProductReviewLambda___get_product_reviews: for any queries related to product reviews and sentiments.
-    - current_time: for current time infomation.
-
-    Your responsibilities:
-    - Categorize the user query and find out which of the above listed tools can answer the question.
-    - If the user question is unrelated then gracefully let the user with reasons of which the question can be answered.
-    - Else, call the specific tool 
-    - Remember the tools produce formatted results, please convert it to markdown so that it can be displayed on the frontend.
-    - When the tool - get_answers_for_structured_data is called,
-        1) Show the Tabular data first, in a nicely formated tabular grid. Merge the column values while displaying if the data is grouped by a column. Show a max of {MAX_ROWS_FOR_SQL_RESULT_DISPLAY} rows in the table and show the row_count.
-        2) Based on the tabular data, if possible, show a graphical representation of the data. 
-        3) Then Show the Key Insights, and please make it brief and concise
-        4) Then if there is a SQL statement, show the generate SQL at the end within <details> tag.
-    - When the tool - get_answers_for_unstructured_data is called, show the sources and the preview at the end within <details> tag.
-    - When the tool - ProductReviewLambda___get_product_reviews is called, 
-        1) pass the related product_id(s), customer_id(s), product_name(s), customer_name(s), top_rows and review_date range based on the user query. 
-        2) Show a max of {MAX_ROWS_FOR_DYNAMODB_RESULT_DISPLAY} rows in the table and show the total row count.
-        3) Please collect all these tool calls and display them at the end within <details> tag.
-
-    Remember previous context from the conversation when responding.
-
-    IMPORTANT: When thinking about how to answer the users question or using tools, please:
-    1. Provide text output to the user, this helps users understand your reasoning process while waiting.
-    2. Then provide your final answer
-    3. When providing the finaly answer keep the summary / insights crisp and short.
-    """
-
-    if _agent_client is None:
-        logger.info("Initializing Orch agent client...")
-
-        #Load the product review gateway tool if possible
-        gateway_tools = []
-        initialize_mcp_client()
-        
-        # Start MCP client session - keep it running for the agent lifecycle
-        _dynamodb_mcp_client.__enter__()
-        
-        try:
-            gateway_tools = get_full_tools_list(_dynamodb_mcp_client)
-            logger.info(f"Successfully loaded {len(gateway_tools)} tools from Gateway.")
-        except Exception as e:
-            logger.error(f"Error loading tools from Gateway: {str(e)}")
-            pass # Proceed without gateway tools if there's an error
-
-        # Create an Strands agent with our defined tools
-        _all_tools = [get_default_questions, get_answers_for_structured_data, get_answers_for_unstructured_data, current_time]
-        _all_tools += gateway_tools # Add the gateway tools
-
-        # Now define the Bedrock Model (we can include the reasoning flag here)
-        bedrock_model = BedrockModel(
-            model_id=BEDROCK_MODEL_ID,
-            additional_request_fields={
-                "thinking": {          # Bedrock rationales / reasoning config
-                    "type": "enabled", # or model-specific enum
-                    "budget_tokens": 4096,  # pick a value within model limits
-                }
-            },
-        )
-
-        # Now define the Strands Agent with the model, tools and system prompt from above
-        _agent_client = Agent(
-            model=bedrock_model,
-            tools=_all_tools,
-            session_manager=AgentCoreMemorySessionManager(memory_config, AWS_REGION), # Reintroduced session_manager
-            system_prompt=AGENT_SYSTEM_PROMPT
-        )
-
-
-#=====================================================================================
-async def process_user_input(user_query: str, user_email: str) -> str:
-    """
-    Creates a Strands agent that answers questions about order and products for a eCommerce solution
-    using the 2 tools, one for Structured data and the second one for Unstructed data
-    There is another additional tool, which help users by showing the sample questions
-    
-    Args:
-        question: The customer's question or request
-        
-    Returns:
-        The agent's response
-    """
-
-    global _agent_client
-    log_conversation("User", f"user_query: {user_query}, user_email: {user_email}")
-
-    try:
-
-        start_time = time.time()
-
-        # If the user_email has been passed, then add that filter context to the prompt
-        if user_email:
-            user_query += f". Also if the above query results in a call to the get_answers_for_structured_data tool and the query mentions my orders or my products or my shipments, if possible, add a WHERE clause to filter the data by customers.email='{user_email}'"
-
-        # Process the question and stream the response back
-        async for event in _agent_client.stream_async(user_query):
-            if "data" in event:
-                yield event["data"]
-
-            #Yield tool use events for UI display
-            elif "current_tool_use" in event:
-                tool_use = event["current_tool_use"]
-                if tool_use.get("name"): # Only yield when tool name is aailable
-                    tool_info = f"Tool: {tool_use['name']}\nInput: {tool_use.get('input',{})}"
-                    yield f"\n[TOOL USE]{tool_info}\n"
-
-            #. Yield reasining/Thinking events for UI
-            elif "reasoning" in event and "reasoningText" in event:
-                yield f"\n[THINKING]{event['reasoningText']}\n"
-
-        end_time = time.time()
-        
-        logger.info(f"Request processed in {end_time - start_time:.2f} seconds")
-        
-    except Exception as e:
-        logger.error(f"Error processing request: {str(e)}")
-        # Yield a graceful error response
-        yield f"I'm sorry, I encountered an error: {str(e)}. Please try again later."
-
+# ENTRY POINT
 #=====================================================================================
 
-# ADDED: BEDROCK_AGENTCORE - APP ENTRYPOINT DECLARATION
+
 @app.entrypoint
 async def main(payload, context):
-
+    """
+    Main entry point for the eCommerce Agent application.
+    
+    Args:
+        payload: Request payload containing user_input
+        context: Request context with headers and metadata
+        
+    Yields:
+        Streaming response chunks
+    """
     logger.info("Starting eCommerce Agent")
     logger.info(f"Received payload: {payload}")
     logger.info(f"Is payload string? {isinstance(payload, str)}")
     
     try:
-        # Extract the user input from the payload
-        logger.info(f"Input Payload: {payload}")
-        user_input = payload.get("user_input")
+        # Get or create application instance
+        app_instance = get_app_instance()
         
-        # Add explicit check
-        if "user_input" not in payload or not user_input:
-            logger.error("No 'user_input' key found in payload, using default")
-            yield "No user_input provided in payload."
-            return
-              
-        headers = context.request_headers
-                
-        # Get the session Id and Actor Id
-        actor_id = headers.get('X-Amzn-Bedrock-AgentCore-Runtime-Custom-Actor-Id', 'user') if headers else 'user'
-        session_id = None
-        if headers and 'X-Amzn-Bedrock-AgentCore-Runtime-Session-Id' in headers:
-            session_id = headers.get('X-Amzn-Bedrock-AgentCore-Runtime-Session-Id')
-        elif payload and 'session_id' in payload:
-            session_id = payload.get('session_id')
-        else:
-            session_id = str(uuid.uuid4())
-
-        # Get the calling user's email address
-        # 1. Get the bearer token from headers
-        auth_header = None
-        if headers and 'Authorization' in headers:
-            auth_header = headers.get("Authorization")
-
-        if not auth_header:
-            # treat as anonymous or raise
-            user_email = None
-        else:
-            token = auth_header.replace("Bearer ", "") if auth_header.startswith("Bearer ") else auth_header
-            # 2. Decode JWT without verifying (or with verification if you load JWKS)
-            claims = jwt.decode(token, options={"verify_signature": False, "verify_aud": False})
-            # 3. Extract email or a stable user id depending on your IdP
-            user_email = claims.get("username") + "@email.com"  # may be None if you chose not to put PII in token
-            # 4. Set the Actor Id to the user EMail address, remember the actor must satisfy regular expression pattern: [a-zA-Z0-9][a-zA-Z0-9-_/]*(?::[a-zA-Z0-9-_/]+)*[a-zA-Z0-9-_/]*
-            actor_id = user_email.replace(".","_").replace("@","-")
-
-        logger.info(f"Extracted user_input: {user_input}, session_id: {session_id}, actor_id: {actor_id}, user_email: {user_email}")
-        logger.info("\n🚀 Processing request...")
-
-        # Configure the Agentcore MemoryConfig
-        memory_config = AgentCoreMemoryConfig(
-            memory_id=AGENTCORE_MEMORY_ID,
-            session_id=session_id,
-            actor_id=actor_id,
-            retrieval_config={
-                f"/users/{actor_id}/facts": RetrievalConfig(top_k=5, relevance_score=0.5),
-                f"/users/{actor_id}/preferences": RetrievalConfig(top_k=5, relevance_score=0.5)
-            }
-        )
-
-        # Use the Agent. Process the request and stream the response
-        initialize_agent_client(memory_config)
-        async for chunk in process_user_input(user_input, user_email):
-            logger.info(f"Streaming chunk: {chunk[:50]}..." if len(str(chunk)) > 50 else f"Streaming chunk: {chunk}")
+        # Process the request and stream responses
+        async for chunk in app_instance.handle_request(payload, context):
             yield chunk
-
+    
     except Exception as e:
-        error_msg = f"Error processing request: {str(e)}"
+        error_msg = f"Error in main entry point: {str(e)}"
         logger.error(error_msg)
         logger.info(f"\n❌ {error_msg}")
-        
-        # Yield error response for AgentCore
         yield f"I'm sorry, I encountered an error: {str(e)}. Please try again later."
-        
+    
     finally:
         logger.info("eCommerce Agent request processed")
 
