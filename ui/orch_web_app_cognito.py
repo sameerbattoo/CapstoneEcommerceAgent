@@ -17,7 +17,7 @@ import hashlib
 import base64
 import pickle
 from pathlib import Path
-
+import re
 
 # ==========================================================================
 # Session Persistence Helper
@@ -323,7 +323,9 @@ def process_agent_response(user_message: str, agent_arn: str, session_id: str, r
     answer_content = ""
     tool_use_content = ""
     thinking_content = ""
-    
+    tool_inputs = {}          # tool_name -> latest full Input: string
+    tool_re = re.compile(r"^Tool:\s*(.+?)\s*Input:\s*(.*)$", re.DOTALL)
+
     # Create the thinking expander at the start
     with thinking_container:
         thinking_expander = st.expander("🤔 Agent Thinking Process", expanded=False)
@@ -347,9 +349,22 @@ def process_agent_response(user_message: str, agent_arn: str, session_id: str, r
                         event_type = event.get("type", "content")
                         event_data = event.get("data", "")
 
+                        #print(f"event_type: {event_type}, event_data: {event_data}")
+
                         # Handle different event types - update placeholders in real-time
                         if event_type == "tool_use":
-                            tool_use_content = event_data
+
+                            m = tool_re.match(event_data.strip()) # Use regular expression
+                            #Get the tool name and the Input fragment
+                            tool_name, tool_input_fragment = m.group(1), m.group(2)
+
+                            # Always store the latest full line for each tool
+                            tool_inputs[tool_name] = f'Tool: {tool_name}\nInput: {tool_input_fragment}'
+
+                            # Rebuild current_block from all tools seen so far, in insertion order
+                            # (Python 3.7+ dict preserves insertion order)
+                            tool_use_content = "\n".join(tool_inputs.values())
+
                             tool_use_placeholder.code(tool_use_content)
                             
                         elif event_type == "thinking":
@@ -814,12 +829,15 @@ def main():
         
         st.header("💡 Example Queries")
         examples = [
-            "List my orders salong with the products in Feb 2025",
-            "Show the distribution by product categories of my orders this year",
+            "Its kinda cold today in California, what products can you suggest from your catalog?",
+            "I am planning to gift an Electronic item. Can you suggest the two 2 products in that category based on the reviews",
+            "List my orders along with the products in Feb 2025, how did others review these?",
+            "Show the distribution by product categories of my orders this year compared to last year",
+            "Display my review history with ratings. Did people find my reviews useful?",
             "List the top 5 user by sales in 2025 and show their product review summary for each of them",
-            "Which customers have spent more than $1000 in the 2nd Quarter of 2025?",
+            "Which customers have spent more than $1000 in the 2nd Quarter of 2025? Did they write any reviews?",
             "What are the specifications of the Winter Jacket and also show the review sentiments",
-            "What colors are available for the Cotton T-Shirt and also how many people bought it in 2025",
+            "What colors are available for the Cotton T-Shirt and also how many people bought it in Q2 2025?",
             "What other sample questions can I ask?",
         ]
         
