@@ -25,13 +25,10 @@ import asyncio
 
 # ADDED: BEDROCK_AGENTCORE IMPORT
 from bedrock_agentcore.runtime import BedrockAgentCoreApp
-from bedrock_agentcore.memory.integrations.strands.config import (
-    AgentCoreMemoryConfig,
-    RetrievalConfig,
-)
-from bedrock_agentcore.memory.integrations.strands.session_manager import (
-    AgentCoreMemorySessionManager
-)
+from bedrock_agentcore.memory import MemoryClient
+from strands.hooks.events import MessageAddedEvent, AgentInitializedEvent
+from strands.hooks.registry import HookProvider
+from strands.agent.conversation_manager import SlidingWindowConversationManager
 
 from strands.tools.mcp.mcp_client import MCPClient
 from mcp.client.streamable_http import streamablehttp_client, StreamableHTTPTransport
@@ -42,6 +39,8 @@ from botocore.awsrequest import AWSRequest
 import httpx
 from typing import Generator
 from datetime import timedelta
+
+from strands.types.content import SystemContentBlock
 
 AWS_SECRET_NAME = "capstone-ecommerce-agent-config" # AWS Secret Manager 
 
@@ -102,6 +101,145 @@ class SigV4HTTPXAuth(httpx.Auth):
 # MAIN CLASSES
 #=====================================================================================
 
+class ECommerceMemoryHook(HookProvider):
+    """Memory hook for persisting conversations to AgentCore Memory."""
+    
+    def __init__(
+        self,
+        memory_client: MemoryClient,
+        memory_id: str,
+        actor_id: str,
+        session_id: str,
+        logger: logging.Logger
+    ):
+        """
+        Initialize the memory hook.
+        
+        Args:
+            memory_client: AgentCore memory client
+            memory_id: AgentCore memory ID
+            actor_id: Actor/user ID
+            session_id: Session ID
+            logger: Logger instance
+        """
+        self.memory_client = memory_client
+        self.memory_id = memory_id
+        self.actor_id = actor_id
+        self.session_id = session_id
+        self.logger = logger
+    
+    def on_agent_initialized(self, event: AgentInitializedEvent):
+        """Load recent conversation history when agent starts."""
+        try:
+            # Load the last 10 conversation turns from memory
+            recent_turns = self.memory_client.get_last_k_turns(
+                memory_id=self.memory_id,
+                actor_id=self.actor_id,
+                session_id=self.session_id,
+                k=10,
+            )
+            
+            if recent_turns:
+                # Format conversation history for context
+                context_messages = []
+                for turn in recent_turns:
+                    for message in turn:
+                        role = "assistant" if message["role"] == "ASSISTANT" else "user"
+                        content = message["content"]["text"]
+                        context_messages.append(
+                            {"role": role, "content": [{"text": content}]}
+                        )
+                
+                # Add context to agent's messages
+                event.agent.messages = context_messages
+                self.logger.info(f"Loaded {len(context_messages)} messages from memory for session {self.session_id}")
+            
+            # Retrieve and add user preferences and facts as context
+            self._add_context_to_system_prompt(event)
+            
+        except Exception as e:
+            self.logger.error(f"Memory load error: {e}")
+    
+    def _add_context_to_system_prompt(self, event: AgentInitializedEvent):
+        """Add user preferences and facts to system prompt."""
+        try:
+            # Get user preferences, top 10
+            preferences = self.memory_client.retrieve_memories(
+                memory_id=self.memory_id,
+                namespace=f"/users/{self.actor_id}/preferences",
+                query="What does the user prefer? What are their settings and product choices, preferred products?",
+                top_k=10
+            )
+            
+            # Get user facts, top 10
+            facts = self.memory_client.retrieve_memories(
+                memory_id=self.memory_id,
+                namespace=f"/users/{self.actor_id}/facts",
+                query="What information do we know about the user? User email, location, past purchases, product reviews.",
+                top_k=10
+            )
+            
+            # Build context string
+            context_parts = []
+            
+            if preferences:
+                prefs_text = "\n".join([p["content"]["text"] for p in preferences])
+                context_parts.append(f"User Preferences:\n{prefs_text}")
+            
+            if facts:
+                facts_text = "\n".join([f["content"]["text"] for f in facts])
+                context_parts.append(f"User Facts:\n{facts_text}")
+            
+            if context_parts:
+                context = "\n\n".join(context_parts)
+                event.agent.system_prompt += f"\n\n<user_context>\n{context}\n</user_context>\n\nNote: Use this context to personalize responses, but do not explicitly mention these preferences or facts unless directly relevant to the user's query."
+                self.logger.info(f"Added user context to system prompt for actor {self.actor_id}")
+        
+        except Exception as e:
+            self.logger.warning(f"Could not retrieve user context: {e}")
+    
+    def on_message_added(self, event: MessageAddedEvent):
+        """Store messages in AgentCore Memory."""
+        try:
+            messages = event.agent.messages
+            if not messages:
+                return
+            
+            last_message = messages[-1]
+            
+            # Only save user and assistant messages
+            if last_message["role"] not in ["user", "assistant"]:
+                return
+            
+            # Check if message has text content
+            if "content" not in last_message or not last_message["content"]:
+                return
+            
+            if "text" not in last_message["content"][0]:
+                return
+            
+            content = last_message["content"][0]["text"]
+            role = last_message["role"].upper() if last_message["role"] == "assistant" else last_message["role"]
+            
+            # Save conversation turn to AgentCore Memory
+            self.memory_client.save_conversation(
+                memory_id=self.memory_id,
+                actor_id=self.actor_id,
+                session_id=self.session_id,
+                messages=[(content, role)]
+            )
+            
+            self.logger.info(f"Saved {role} message to memory for session: {self.session_id}, actor_id: {self.actor_id}")
+        
+        except Exception as e:
+            self.logger.error(f"Memory save error: {e}")
+    
+    def register_hooks(self, registry):
+        """Register hook callbacks."""
+        registry.add_callback(MessageAddedEvent, self.on_message_added)
+        registry.add_callback(AgentInitializedEvent, self.on_agent_initialized)
+
+
 class AgentManager:
     """Manages all agent instances with lazy loading."""
     
@@ -120,8 +258,11 @@ class AgentManager:
         self._sql_agent = None
         self._kb_agent = None
         self._mcp_client = None
-        self._orchestrator_agent = None
+        self._orchestrator_agents = {}  # session_id -> Agent instance
         self._mcp_session_active = False
+        
+        # Initialize memory client for AgentCore Memory
+        self._memory_client = MemoryClient(region_name=config['aws_region'])
     
     @property
     def sql_agent(self):
@@ -193,61 +334,118 @@ class AgentManager:
             self.logger.error(f"Error loading tools from Gateway: {str(e)}")
             return []
     
-    def _build_system_prompt(self, max_sql_rows: int, max_dynamo_rows: int) -> str:
+    def _build_system_prompt(self, user_email: str, max_sql_rows: int, max_dynamo_rows: int) -> str:
         """Build the system prompt for the orchestrator agent."""
         return f"""
-You are an intelligent E-commerce Assistant Agent designed to help users with queries related to products, orders and reviews. 
+            # E-commerce Assistant Agent
 
-You are a orchestrator agent which has access to the following tools:
-- get_default_questions: for listing the sample questions that the user can ask related to products and orders.
-- get_answers_for_structured_data: for any queries related to Transactional Data, this tool already has the capability to generate SQL based on user query and execute and get the formatted results.
-- get_answers_for_unstructured_data: for any query related to Product Knowledge Base, this toll already has the capability to query the knowledgebase based on user query and get the formatted results.
-- ProductReviewLambda___get_product_reviews: for any queries related to product reviews and sentiments.
-- current_time: for current time infomation.
+            <role>
+            You are an intelligent E-commerce Assistant Agent designed to help users with queries related to products, orders, and reviews. Your primary responsibility is to analyze user queries and utilize the appropriate tools to provide accurate and helpful responses.
+            </role>
 
-Your responsibilities:
-- Categorize the user query and find out which of the above listed tools can answer the question.
-- If the user question is unrelated then gracefully let the user with reasons of which the question can be answered.
-- Else, call the specific tool 
-- Remember the tools produce formatted results, please convert it to markdown so that it can be displayed on the frontend.
-- When the tool - get_answers_for_structured_data is called,
-    1) Show the Tabular data first, in a nicely formated tabular grid. Merge the column values while displaying if the data is grouped by a column. Show a max of {max_sql_rows} rows in the table and show the row_count.
-    2) Based on the tabular data, if possible, show a graphical representation of the data. 
-    3) Then Show the Key Insights, and please make it brief and concise
-    4) Then if there is a SQL statement, show the generate SQL at the end within <details> tag.
-- When the tool - get_answers_for_unstructured_data is called, show the sources and the preview at the end within <details> tag.
-- When the tool - ProductReviewLambda___get_product_reviews is called, 
-    1) pass the related product_id(s), customer_id(s), product_name(s), customer_name(s), top_rows and review_date range based on the user query. 
-    2) Show a max of {max_dynamo_rows} rows in the table and show the total row count.
-    3) Please collect all these tool calls and display them at the end within <details> tag.
+            <available_tools>
+            1. **get_default_questions**
+            - Purpose: Lists sample questions users can ask about products and orders.
+            - Use when: User is unsure what to ask or needs examples of possible queries.
 
-Remember previous context from the conversation when responding.
+            2. **get_answers_for_structured_data**
+            - Purpose: Handles queries related to Transactional Data.
+            - Use when: User asks about orders, shipments, inventory, sales data, or other structured information.
+            - Action: Generates SQL, executes it, and returns formatted results.
 
-IMPORTANT: When thinking about how to answer the users question or using tools, please:
-1. Provide text output to the user, this helps users understand your reasoning process while waiting.
-2. Then provide your final answer
-3. When providing the finaly answer keep the summary / insights crisp and short.
-"""
+            3. **get_answers_for_unstructured_data**
+            - Purpose: Processes queries related to Product Knowledge Base.
+            - Use when: User asks about product specifications, features, compatibility, or usage instructions.
+            - Action: Searches the knowledgebase and returns formatted results.
+
+            4. **ProductReviewLambda___get_product_reviews**
+            - Purpose: Retrieves information about product reviews and sentiments.
+            - Use when: User asks about product ratings, customer feedback, or review analysis.
+
+            5. **current_time**
+            - Purpose: Provides current time information.
+            - Use when: User needs to know the current time or for time-sensitive operations.
+            </available_tools>
+
+            <core_responsibilities>
+            1. Analyze each user query to determine which tool is most appropriate.
+            2. If the query is outside your scope, politely explain why with specific reasons.
+            3. Call the appropriate tool to retrieve the necessary information.
+            4. Convert all tool results to markdown format for frontend display.
+            5. Maintain context from previous conversation when responding to follow-up queries.
+            </core_responsibilities>
+
+            <tool_instructions>
+            When using **get_answers_for_structured_data**:
+            - For queries about "my orders," "my products," or "my shipments," add a WHERE clause: `customers.email='{user_email}'`
+            - Present results in this order:
+            1. Display tabular data in a well-formatted markdown grid
+            2. Merge column values when data is grouped by a column
+            3. Show maximum {max_sql_rows} rows and include the total row count
+            4. Include a graphical representation of the data when applicable
+            5. Provide brief, concise key insights about the data
+            6. Include the generated SQL statement within `<details>` tags at the end
+
+            When using **get_answers_for_unstructured_data**:
+            - Display the retrieved information in a clear, structured format
+            - Include sources and preview within `<details>` tags at the end
+
+            When using **ProductReviewLambda___get_product_reviews**:
+            - Pass relevant parameters based on the query:
+            - product_id(s)
+            - customer_id(s)
+            - product_name(s)
+            - customer_name(s)
+            - top_rows
+            - review_date range
+            - For queries about "my reviews," filter by passing {user_email} as customer_id parameter
+            - Show maximum {max_dynamo_rows} rows and include the total row count
+            - Include all tool calls within `<details>` tags at the end
+            </tool_instructions>
+
+            <response_format>
+            1. First, provide your reasoning process to show how you analyzed the query and selected the appropriate tool.
+            2. Present the requested information in a clear, structured format using markdown.
+            3. Include any relevant summaries or insights in a concise manner.
+            4. Place technical details (SQL queries, tool calls) in collapsible `<details>` sections.
+            </response_format>
+
+            <workflow>
+            1. Analyze the user query to understand their intent
+            2. Determine which tool is most appropriate for addressing the query
+            3. Call the selected tool with the necessary parameters
+            4. Format the results in markdown for clear presentation
+            5. Add concise insights or summaries if applicable
+            6. Include technical details in collapsible sections
+            </workflow>
+
+            When responding to a user query, provide your answer immediately without any preamble, focusing only on addressing the user's specific request.
+            """
     
     def initialize_orchestrator(
         self,
-        memory_config: AgentCoreMemoryConfig,
+        session_id: str,
+        actor_id: str,
+        user_email: str,
         max_sql_rows: int,
         max_dynamo_rows: int
     ) -> None:
         """
-        Initialize the orchestrator agent with tools and configuration.
+        Initialize the orchestrator agent with tools and configuration for a specific session.
         
         Args:
-            memory_config: AgentCore memory configuration
+            session_id: Session ID for this conversation
+            actor_id: Actor/user ID
+            user_email: logged in user email
             max_sql_rows: Maximum rows to display for SQL results
             max_dynamo_rows: Maximum rows to display for DynamoDB results
         """
-        if self._orchestrator_agent is not None:
-            self.logger.info("Orchestrator agent already initialized")
+        # Check if agent already exists for this session
+        if session_id in self._orchestrator_agents:
+            self.logger.info(f"Orchestrator agent already exists for session: {session_id}")
             return
         
-        self.logger.info("Initializing orchestrator agent...")
+        self.logger.info(f"Initializing orchestrator agent for session: {session_id}")
         
         # Load gateway tools if MCP client is available
         gateway_tools = []
@@ -255,8 +453,9 @@ IMPORTANT: When thinking about how to answer the users question or using tools, 
             # Initialize and start MCP client session
             _ = self.mcp_client  # Trigger lazy loading
             if self._mcp_client:
-                self._mcp_client.__enter__()
-                self._mcp_session_active = True
+                if not self._mcp_session_active:
+                    self._mcp_client.__enter__()
+                    self._mcp_session_active = True
                 gateway_tools = self._get_mcp_tools()
         
         # Collect all tools
@@ -269,11 +468,12 @@ IMPORTANT: When thinking about how to answer the users question or using tools, 
         all_tools += gateway_tools
         
         # Build system prompt
-        system_prompt = self._build_system_prompt(max_sql_rows, max_dynamo_rows)
+        system_prompt = self._build_system_prompt(user_email, max_sql_rows, max_dynamo_rows)
         
         # Create Bedrock model with reasoning
         bedrock_model = BedrockModel(
             model_id=self.config['bedrock_model_id'],
+            cache_tools="default", # Using tool caching with BedrockModel
             additional_request_fields={
                 "thinking": {
                     "type": "enabled",
@@ -282,20 +482,53 @@ IMPORTANT: When thinking about how to answer the users question or using tools, 
             },
         )
         
-        # Create the orchestrator agent
-        self._orchestrator_agent = Agent(
+        # Create memory hook for this session
+        memory_hook = ECommerceMemoryHook(
+            memory_client=self._memory_client,
+            memory_id=self.config['agentcore_memory_id'],
+            actor_id=actor_id,
+            session_id=session_id,
+            logger=self.logger
+        )
+
+        # Configure conversation management for production
+        conversation_manager = SlidingWindowConversationManager(
+            window_size=10,  # Limit history size
+        )
+
+        # Define system prompt with cache points
+        system_content = [
+            SystemContentBlock(
+                text=system_prompt
+            ),
+            SystemContentBlock(cachePoint={"type": "default"})
+        ]
+        
+        # Create the orchestrator agent for this session with memory hook
+        agent = Agent(
             model=bedrock_model,
             tools=all_tools,
-            session_manager=AgentCoreMemorySessionManager(memory_config, self.config['aws_region']),
-            system_prompt=system_prompt
+            hooks=[memory_hook],
+            system_prompt=system_content, # System prompt with cache points
+            conversation_manager=conversation_manager
         )
         
-        self.logger.info("Orchestrator agent initialized successfully")
+        # Store agent by session_id
+        self._orchestrator_agents[session_id] = agent
+        
+        self.logger.info(f"Orchestrator agent initialized successfully for session: {session_id}")
+    
+    def get_orchestrator(self, session_id: str) -> Optional[Agent]:
+        """Get the orchestrator agent for a specific session."""
+        return self._orchestrator_agents.get(session_id)
     
     @property
     def orchestrator(self) -> Optional[Agent]:
-        """Get the orchestrator agent."""
-        return self._orchestrator_agent
+        """Get the orchestrator agent. Note: Use get_orchestrator(session_id) for session-specific agents."""
+        # Return the first agent if any exists (for backward compatibility)
+        if self._orchestrator_agents:
+            return next(iter(self._orchestrator_agents.values()))
+        return None
     
     def cleanup(self) -> None:
         """Clean up resources."""
@@ -396,16 +629,7 @@ class ECommerceAgentApplication:
             raise ValueError(f"{env_variable} environment variable is required")
         
         return env_variable_val
-    
-    def _extract_session_id(self, headers: Optional[Dict], payload: Dict) -> str:
-        """Extract or generate session ID."""
-        if headers and 'X-Amzn-Bedrock-AgentCore-Runtime-Session-Id' in headers:
-            return headers.get('X-Amzn-Bedrock-AgentCore-Runtime-Session-Id')
-        elif payload and 'session_id' in payload:
-            return payload.get('session_id')
-        else:
-            return str(uuid.uuid4())
-    
+      
     def _extract_user_context(self, headers: Optional[Dict]) -> Tuple[Optional[str], str]:
         """
         Extract user email and actor_id from request headers.
@@ -443,57 +667,31 @@ class ECommerceAgentApplication:
         
         return user_email, actor_id
     
-    def _build_memory_config(self, session_id: str, actor_id: str) -> AgentCoreMemoryConfig:
-        """Build AgentCore memory configuration."""
-        return AgentCoreMemoryConfig(
-            memory_id=self.config['agentcore_memory_id'],
-            session_id=session_id,
-            actor_id=actor_id,
-            retrieval_config={
-                f"/users/{actor_id}/facts": RetrievalConfig(top_k=5, relevance_score=0.5),
-                f"/users/{actor_id}/preferences": RetrievalConfig(top_k=5, relevance_score=0.5)
-            }
-        )
-    
-    def _add_user_context_filter(self, user_query: str, user_email: Optional[str]) -> str:
-        """Add user context filtering to the query."""
-        if not user_email:
-            return user_query
-        
-        context_filter = f""". 
-Also,
-    If the above query results in a call to the get_answers_for_structured_data tool and the query mentions my orders or my products or my shipments, 
-    - then, if possible, add a WHERE clause to filter the data by customers.email='{user_email}'.
-    If the above query results in a call to the ProductReviewLambda___get_product_reviews tool and the query mentions my reviews,
-    - then, filter product review data by passing the current user: {user_email} as customer_id parameter.
-"""
-        return user_query + context_filter
-    
-    async def process_and_stream(self, user_query: str, user_email: Optional[str]):
+    async def process_and_stream(self, user_query: str, user_email: Optional[str], session_id: str):
         """
         Process user input and stream responses.
         
         Args:
             user_query: The user's question or request
             user_email: The email address of the current logged-in user
+            session_id: The session ID for this conversation
             
         Yields:
             Streaming response chunks, tool use events, and thinking events
         """
-        log_conversation("User", f"user_query: {user_query}, user_email: {user_email}")
+        log_conversation("User", f"user_query: {user_query}, user_email: {user_email}, session_id: {session_id}")
         
-        if not self.agent_manager.orchestrator:
+        # Get the agent for this specific session
+        agent = self.agent_manager.get_orchestrator(session_id)
+        if not agent:
             yield "Agent not initialized. Please try again."
             return
         
         try:
             start_time = time.time()
-            
-            # Add user context filtering
-            enhanced_query = self._add_user_context_filter(user_query, user_email)
-            
-            # Stream responses from the agent
-            async for event in self.agent_manager.orchestrator.stream_async(enhanced_query):
+                      
+            # Stream responses from the session-specific agent
+            async for event in agent.stream_async(user_query):
                 if "data" in event:
                     yield event["data"]
                 
@@ -522,7 +720,7 @@ Also,
         
         Args:
             payload: Request payload containing user_input
-            context: Request context with headers
+            context: Request context with headers, metadata, and session_id
             
         Yields:
             Streaming response chunks
@@ -537,28 +735,31 @@ Also,
                 yield "No user_input provided in payload."
                 return
             
-            # Extract headers
-            headers = context.request_headers if hasattr(context, 'request_headers') else None
+            # Get session_id from AgentCore context (set by X-Amzn-Bedrock-AgentCore-Runtime-Session-Id header)
+            session_id = context.session_id if hasattr(context, 'session_id') else None
+            if not session_id:
+                # Fallback to generating one if not provided
+                session_id = str(uuid.uuid4())
+                self.logger.warning(f"No session_id in context, generated: {session_id}")
             
-            # Get session and user context
-            session_id = self._extract_session_id(headers, payload)
+            # Extract headers for user context
+            headers = context.request_headers if hasattr(context, 'request_headers') else None
             user_email, actor_id = self._extract_user_context(headers)
             
             self.logger.info(f"Processing - user_input: {user_input}, session_id: {session_id}, actor_id: {actor_id}, user_email: {user_email}")
             self.logger.info("\n🚀 Processing request...")
             
-            # Build memory configuration
-            memory_config = self._build_memory_config(session_id, actor_id)
-            
-            # Initialize orchestrator with memory config
+            # Initialize orchestrator with memory hook for this session
             self.agent_manager.initialize_orchestrator(
-                memory_config,
+                session_id,
+                actor_id,
+                user_email,
                 self.MAX_ROWS_FOR_SQL_RESULT_DISPLAY,
                 self.MAX_ROWS_FOR_DYNAMODB_RESULT_DISPLAY
             )
             
-            # Process the request and stream responses
-            async for chunk in self.process_and_stream(user_input, user_email):
+            # Process the request and stream responses with session-specific agent
+            async for chunk in self.process_and_stream(user_input, user_email, session_id):
                 self.logger.info(f"Streaming chunk: {chunk[:50]}..." if len(str(chunk)) > 50 else f"Streaming chunk: {chunk}")
                 yield chunk
         
