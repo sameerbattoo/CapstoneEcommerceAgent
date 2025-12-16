@@ -102,7 +102,7 @@ def init_session_state():
         saved_session = load_auth_session()
         if saved_session:
             st.session_state.authenticated = True
-            st.session_state.username = saved_session["username"]
+            st.session_state.username = saved_session["username"].lower()
             st.session_state.access_token = saved_session["access_token"]
             st.session_state.id_token = saved_session["id_token"]
             st.session_state.refresh_token = saved_session["refresh_token"]
@@ -349,8 +349,6 @@ def process_agent_response(user_message: str, agent_arn: str, session_id: str, r
                         event_type = event.get("type", "content")
                         event_data = event.get("data", "")
 
-                        #print(f"event_type: {event_type}, event_data: {event_data}")
-
                         # Handle different event types - update placeholders in real-time
                         if event_type == "tool_use":
 
@@ -471,6 +469,58 @@ def transcribe_audio_with_aws(audio_bytes: bytes, region: str, s3_bucket: str) -
         raise e
 
 # ==========================================================================
+# Helper function to fetch session memory from AgentCore
+def fetch_session_memory(memory_id: str, session_id: str, actor_id: str, region: str):
+    """
+    Fetch stored memory for a session from AgentCore Memory.
+    
+    Args:
+        memory_id: AgentCore memory ID
+        session_id: Session ID
+        actor_id: Actor ID
+        region: AWS region
+        
+    Returns:
+        Dictionary with memory data or error message
+    """
+    try:
+        from bedrock_agentcore.memory import MemoryClient
+        
+        client = MemoryClient(region_name=region)
+        
+        # Get last conversation turns
+        turns = client.get_last_k_turns(
+            memory_id=memory_id,
+            actor_id=actor_id,
+            session_id=session_id,
+            k=10  # Get last 10 turns
+        )
+        
+        # Get user preferences, top 10
+        preferences = client.retrieve_memories(
+            memory_id=memory_id,
+            namespace=f"/users/{actor_id}/preferences",
+            query="What does the user prefer? What are their settings and product choices, preferred products?",
+            top_k=10
+        )
+        
+        # Get user facts, top 10
+        facts = client.retrieve_memories(
+            memory_id=memory_id,
+            namespace=f"/users/{actor_id}/facts",
+            query="What information do we know about the user?  User email, location, past purchases, product reviews.",
+            top_k=10
+        )
+        
+        return {
+            "turns": turns,
+            "preferences": preferences,
+            "facts": facts
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+# ==========================================================================
 # Helper function to call the agentcore API based on the access-token and return the streaming response
 def invoke_agentcore_agent(user_input: str, agent_arn: str, session_id: str, region: str, access_token: str = None):
     """
@@ -490,7 +540,7 @@ def invoke_agentcore_agent(user_input: str, agent_arn: str, session_id: str, reg
     escaped_arn = urllib.parse.quote(agent_arn, safe="")
     url = f"https://bedrock-agentcore.{region}.amazonaws.com/runtimes/{escaped_arn}/invocations"
     
-    # Prepare headers
+    # Prepare headers - use the correct AgentCore session header
     headers = {
         "Content-Type": "application/json",
         "X-Amzn-Bedrock-AgentCore-Runtime-Session-Id": session_id,
@@ -504,10 +554,9 @@ def invoke_agentcore_agent(user_input: str, agent_arn: str, session_id: str, reg
         session = boto3.Session()
         credentials = session.get_credentials()
     
-    # Prepare the payload
+    # Prepare the payload - session_id is now only in header, not payload
     payload = {
-        "user_input": user_input,
-        "session_id": session_id
+        "user_input": user_input
     }
     
     body = json.dumps(payload)
@@ -631,7 +680,7 @@ def show_login_page(user_auth: UserAuth, use_admin_auth: bool = False):
                         
                         if result and 'AuthenticationResult' in result:
                             st.session_state.authenticated = True
-                            st.session_state.username = st.session_state.temp_username
+                            st.session_state.username = st.session_state.temp_username.lower()
                             st.session_state.id_token = result['AuthenticationResult']['IdToken']
                             st.session_state.access_token = result['AuthenticationResult']['AccessToken']
                             st.session_state.refresh_token = result['AuthenticationResult'].get('RefreshToken')
@@ -681,14 +730,14 @@ def show_login_page(user_auth: UserAuth, use_admin_auth: bool = False):
                     if result:
                         if 'AuthenticationResult' in result:
                             st.session_state.authenticated = True
-                            st.session_state.username = username
+                            st.session_state.username = username.lower()
                             st.session_state.id_token = result['AuthenticationResult']['IdToken']
                             st.session_state.access_token = result['AuthenticationResult']['AccessToken']
                             st.session_state.refresh_token = result['AuthenticationResult'].get('RefreshToken')
                             
                             # Save session for persistence across page refreshes
                             save_auth_session(
-                                username,
+                                username.lower(),
                                 st.session_state.id_token,
                                 st.session_state.access_token,
                                 st.session_state.refresh_token
@@ -774,6 +823,13 @@ def main():
     with st.sidebar:
         st.header("👤 User Info")
         st.write(f"**Username:** {st.session_state.username}")
+        
+        # Display truncated session ID as clickable link
+        session_id = st.session_state.session_id
+        truncated_session = f"{session_id[:10]}...{session_id[-10:]}"
+        st.write(f"**Session:**")
+        if st.button(f"🔍 {truncated_session}", key="session_id_btn", help="Click to view session memory", use_container_width=True):
+            st.session_state.show_memory_dialog = True
         
         if st.button("🚪 Logout", use_container_width=True, type="secondary"):
             UserAuth.logout()
@@ -864,17 +920,22 @@ def main():
     # Fixed bottom section with sample questions using CSS
     st.markdown("""
         <style>
-            /* Fixed bottom panel styling */
+            /* Account for sidebar width - Streamlit's default sidebar is ~21rem */
+            :root {
+                --sidebar-width: 21rem;
+            }
+            
+            /* Fixed bottom panel styling - positioned to the right of sidebar */
             .fixed-bottom-section {
                 position: fixed;
-                bottom: 120px;
-                left: 0;
+                bottom: 90px;
+                left: var(--sidebar-width);
                 right: 0;
                 background: linear-gradient(to top, rgba(255,255,255,0.98) 0%, rgba(255,255,255,0.95) 100%);
                 backdrop-filter: blur(10px);
                 border-top: 2px solid #e0e0e0;
-                padding: 0.75rem 2rem;
-                z-index: 999;
+                padding: 0.5rem 1.5rem;
+                z-index: 998;
                 box-shadow: 0 -4px 12px rgba(0,0,0,0.1);
                 max-height: 180px;
                 overflow-y: auto;
@@ -882,7 +943,47 @@ def main():
             
             /* Adjust main content to not be hidden by fixed panel */
             .main .block-container {
-                padding-bottom: 320px !important;
+                padding-bottom: 350px !important;
+            }
+            
+            /* Ensure chat messages don't flow behind fixed elements */
+            .stChatFloatingInputContainer {
+                padding-bottom: 280px !important;
+            }
+            
+            /* Add padding to the main chat area */
+            section[data-testid="stChatMessageContainer"] {
+                padding-bottom: 280px !important;
+            }
+            
+            /* Ensure chat input stays at the bottom and to the right of sidebar */
+            [data-testid="stChatInput"] {
+                position: fixed !important;
+                bottom: 0 !important;
+                left: var(--sidebar-width) !important;
+                right: 0 !important;
+                z-index: 1000 !important;
+                background: white !important;
+                padding: 0.75rem 1rem !important;
+                border-top: 1px solid #e0e0e0 !important;
+                margin: 0 !important;
+            }
+            
+            /* Ensure the chat input container is properly positioned */
+            .stChatInputContainer {
+                position: fixed !important;
+                bottom: 0 !important;
+                left: var(--sidebar-width) !important;
+                right: 0 !important;
+                z-index: 1000 !important;
+                background: white !important;
+            }
+            
+            /* When sidebar is collapsed, adjust positioning */
+            [data-testid="collapsedControl"] ~ * .fixed-bottom-section,
+            [data-testid="collapsedControl"] ~ * [data-testid="stChatInput"],
+            [data-testid="collapsedControl"] ~ * .stChatInputContainer {
+                left: 0 !important;
             }
             
             /* Style for the expander in fixed section */
@@ -907,7 +1008,7 @@ def main():
                 margin-bottom: 0.5rem;
                 border-radius: 20px;
                 padding: 0.4rem 0.75rem;
-                font-size: 0.525rem;
+                font-size: 0.85rem;
                 border: 1px solid #ddd;
                 background: white;
                 transition: all 0.3s ease;
@@ -916,7 +1017,8 @@ def main():
                 text-overflow: ellipsis;
                 text-align: left;
                 line-height: 1.3;
-                height: 36px;
+                height: auto;
+                min-height: 36px;
                 width: 100%;
                 display: block;
             }
@@ -965,6 +1067,15 @@ def main():
                 .fixed-bottom-section .stButton button:hover {
                     background: #1e1e1e;
                 }
+                [data-testid="stChatInput"], .stChatInputContainer {
+                    background: #0e1117 !important;
+                    border-top-color: #4a4a4a !important;
+                }
+            }
+            
+            /* Hide the fixed section when expander is collapsed to prevent overlap */
+            .fixed-bottom-section:has(.streamlit-expanderHeader[aria-expanded="false"]) {
+                max-height: 60px;
             }
         </style>
     """, unsafe_allow_html=True)
@@ -1026,6 +1137,121 @@ def main():
                 "role": "assistant",
                 "content": answer_content
             })
+    
+    # Memory Dialog
+    # Note: If dialog was closed via X button, reset the flag on next interaction
+    if st.session_state.get("show_memory_dialog", False):
+        @st.dialog("Session Memory using AgentCore Memory", width="large")
+        def show_memory():
+            # Set a flag to track if we're inside the dialog
+            st.session_state.dialog_is_open = True
+            
+            st.write(f"**Session ID:** `{st.session_state.session_id}`")
+            user_email_temp = f"{st.session_state.username}@email.com"
+            st.write(f"**Actor ID:** `{user_email_temp.replace('.', '_').replace('@', '-')}`")
+            
+            # Get memory ID from environment
+            memory_id = os.getenv('AGENTCORE_MEMORY_ID')
+            
+            if not memory_id:
+                st.error("⚠️ AGENTCORE_MEMORY_ID not configured")
+                if st.button("Close"):
+                    st.session_state.show_memory_dialog = False
+                    st.rerun()
+                return
+            
+            with st.spinner("Loading session memory..."):
+                actor_id = user_email_temp.replace('.', '_').replace('@', '-')
+                memory_data = fetch_session_memory(
+                    memory_id,
+                    st.session_state.session_id,
+                    actor_id,
+                    aws_region
+                )
+            
+            if "error" in memory_data:
+                st.error(f"❌ Error loading memory: {memory_data['error']}")
+            else:
+                # Display conversation turns
+                st.subheader("💬 Conversation History")
+                if memory_data.get("turns"):
+                    # Flatten all messages from all turns
+                    all_messages = []
+                    for turn in memory_data["turns"]:
+                        for msg in turn:
+                            all_messages.append(msg)
+                    
+                    # Reverse to get chronological order (oldest first)
+                    all_messages.reverse()
+                    
+                    # Display messages
+                    turns_data = []
+                    for idx, msg in enumerate(all_messages, 1):
+                        role = msg.get("role", "unknown")
+                        content = msg.get("content", {}).get("text", "")
+                        turns_data.append({
+                            "#": idx,
+                            "Role": role,
+                            "Content": content[:1000] + "..." if len(content) > 1000 else content
+                        })
+                    
+                    if turns_data:
+                        st.dataframe(turns_data, use_container_width=True, hide_index=True)
+                        st.caption(f"📝 Showing {len(turns_data)} messages (Note: Messages are displayed in the order they were saved to memory)")
+                    else:
+                        st.info("No conversation history found")
+                else:
+                    st.info("No conversation history found")
+                
+                # Display user preferences
+                st.subheader("⚙️ User Preferences")
+                if memory_data.get("preferences"):
+                    prefs_data = []
+                    for pref in memory_data["preferences"]:
+                        content = pref.get("content", {}).get("text", "")
+                        score = pref.get("relevanceScore", 0)
+                        prefs_data.append({
+                            "Preference": content
+                            #,"Relevance": f"{score:.2f}"
+                        })
+                    
+                    if prefs_data:
+                        st.dataframe(prefs_data, use_container_width=True, hide_index=True)
+                    else:
+                        st.info("No preferences stored")
+                else:
+                    st.info("No preferences stored")
+                
+                # Display user facts
+                st.subheader("📝 User Facts")
+                if memory_data.get("facts"):
+                    facts_data = []
+                    for fact in memory_data["facts"]:
+                        content = fact.get("content", {}).get("text", "")
+                        score = fact.get("relevanceScore", 0)
+                        facts_data.append({
+                            "Fact": content
+                            #,"Relevance": f"{score:.2f}"
+                        })
+                    
+                    if facts_data:
+                        st.dataframe(facts_data, use_container_width=True, hide_index=True)
+                    else:
+                        st.info("No facts stored")
+                else:
+                    st.info("No facts stored")
+            
+            if st.button("Close", type="primary", use_container_width=True):
+                st.session_state.show_memory_dialog = False
+                st.session_state.dialog_is_open = False
+                st.rerun()
+        
+        show_memory()
+    else:
+        # If dialog is not showing but was previously open, it was closed via X button
+        if st.session_state.get("dialog_is_open", False):
+            st.session_state.show_memory_dialog = False
+            st.session_state.dialog_is_open = False
 
 
 if __name__ == "__main__":
