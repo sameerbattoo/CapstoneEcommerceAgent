@@ -13,6 +13,8 @@ from datetime import datetime
 from strands import Agent
 from strands.models.bedrock import BedrockModel
 
+from strands.types.content import SystemContentBlock
+
 # Define constants
 MAX_ROWS_FOR_SQL_RESULT_DISPLAY = 20
 MAX_SAMPLE_QUESTIONS = 5
@@ -204,12 +206,6 @@ class SQLAgent:
         self.create_statements = schema_extractor.extract_schema()
         log_info(logger, "SQLAgent.Init", f"Step 1: Extracted schema for {len(self.create_statements)} tables")
 
-        # Prepare schema context
-        schema_context = "\n\n".join([
-            f"-- Table: {table}\n{stmt}" 
-            for table, stmt in self.create_statements.items()
-        ])
-        
         # Step 2: Initialize SQL executor tool
         self.executor_tool = SQLExecutorTool(db_config)
         log_info(logger, "SQLAgent.Init", f"Step 2: SQLExecutorTool configured")
@@ -221,35 +217,76 @@ class SQLAgent:
         )
         log_info(logger, "SQLAgent.Init", f"Step 3: Bedrock model initialized")
         
-        # Step 4: Create Strands agent with Bedrock model
+        # Step 4: Build system prompt with schema context
+        system_prompt = self._build_system_prompt()
+        log_info(logger, "SQLAgent.Init", f"Step 4: Built system prompt")
+        
+        # Step 5: Create Strands agent with Bedrock model
         self.agent = Agent(
             name="SQL Query Agent",
-            system_prompt=f"""You are a SQL query assistant with access to database CREATE TABLE statements.
-
-You are a SQL developer creating queries that will be run against AWS RDS for PostgreSQL.
-Here is how I want you to think step by step:
-1. Accept user queries about data
-2. Analyze the user request to understand the main objective. - Break down reqeusts into sub-queries that can each address a part of the user request, using the provided CREATE TABLE statements
-3. For each sub-query, use the relevant tables and fields from the provided schema. - Construct SQL queries that are precise and tailored to retrieve the exact data required by the user query
-4. Validate if the database schema (provided as CREATE TABLE statements) can answer the query, if not, please don't create the SQL
-5. Generate accurate SQL SELECT statements for valid queries using the CREATE TABLE definitions
-
-Important guidelines:
-- Use the CREATE TABLE statements to understand table structure, columns, data types, and relationships
-- Only generate SELECT queries (no INSERT, UPDATE, DELETE, DROP, etc.)
-- Consider foreign key relationships when joining tables
-- Always optimize SQL queries for performance and clarity.
-- Keep in mind When constructing the WHERE clause for order.status, the values in the table are - delivered, processing, shipped.
-
-Database Schema (CREATE TABLE statements):
-{schema_context}
-
-""",
+            system_prompt=[ # Define system prompt with cache points
+                SystemContentBlock(
+                    text=system_prompt
+                ),
+                SystemContentBlock(cachePoint={"type": "default"})
+            ],
             model=self.model
         )
-        log_info(logger, "SQLAgent.Init", f"Step 4: Created Strands agent with Bedrock model")
+        log_info(logger, "SQLAgent.Init", f"Step 5: Created Strands agent with Bedrock model")
         log_info(logger, "SQLAgent.Init", f"Ending function")
 
+    def _build_system_prompt(self) -> str:
+        """Build the system prompt for the SQL agent with database schema context."""
+        
+        # Prepare schema context from extracted CREATE TABLE statements
+        schema_context = "\n\n".join([
+            f"-- Table: {table}\n{stmt}" 
+            for table, stmt in self.create_statements.items()
+        ])
+        
+        return f"""
+            # SQL Generation Agent
+
+            <task_description>
+            You are an advanced SQL query assistant specializing in PostgreSQL for AWS RDS environments. Your role is to translate natural language data requests into optimized SQL queries based on the provided database schema.
+            </task_description>
+
+            <database_context>
+            Database Schema:
+            {schema_context}
+            </database_context>
+
+            <instructions>
+            When generating SQL queries, follow this systematic approach:
+
+            1. **Analyze Request**: Carefully examine the user's data request to identify the core information needs and requirements.
+
+            2. **Schema Validation**: Verify that the provided database schema contains all necessary tables and fields to fulfill the request. If the schema is insufficient to answer the query, indicate this limitation rather than creating an inaccurate query.
+
+            3. **Query Decomposition**: Break complex requests into logical sub-queries when appropriate, ensuring each component addresses a specific part of the overall request.
+
+            4. **SQL Construction**: 
+            - Create precise SELECT statements that retrieve exactly the data requested
+            - Utilize appropriate JOINs based on foreign key relationships
+            - Implement efficient filtering conditions in WHERE clauses
+            - Apply proper aggregation functions and GROUP BY clauses when needed
+            - Include ORDER BY for meaningful result sequencing when appropriate
+            - Consider LIMIT clauses to prevent excessive result sets
+
+            5. **Query Optimization**: Ensure all queries are optimized for performance in a PostgreSQL environment, following AWS RDS best practices.
+            </instructions>
+
+            <constraints>
+            - Generate SELECT statements ONLY (no data modification queries like INSERT, UPDATE, DELETE)
+            - Respect the exact table and column names as defined in the schema
+            - For order status filtering, use the exact values present in the database: 'delivered', 'processing', or 'shipped'
+            - Include proper table aliases when joining multiple tables
+            - Ensure all column references are fully qualified with table names/aliases when multiple tables are involved
+            - Add comments to explain complex query logic when necessary
+            </constraints>
+
+            """
+    
     def get_schema_summary(self) -> str:
         """Get a summary of available tables."""
         summary = "Available Tables:\n"
@@ -263,13 +300,42 @@ Database Schema (CREATE TABLE statements):
         log_info(self.logger, "SQLAgent.get_sample_questions", f"Starting function")
         # Use agent to generate the sample questions
         prompt = f"""
-User Query: List {no_of_questions} user questions that can be answered by the database tables.
+        # Database Question Generator
 
-Format your response as a JSON array of strings (no extra text) like:
-```json
-[]
-```
-"""
+        <task_description>
+        Generate {no_of_questions} realistic user questions that can be answered using the available database tables. These questions should represent common queries a user might ask about the data contained in these tables.
+        </task_description>
+
+        <context>
+        You have access to database tables with various fields and relationships. Based on the structure and content of these tables, create questions that:
+        - Can be directly answered by querying the database
+        - Cover different types of information available in the tables
+        - Represent practical information needs users might have
+        </context>
+
+        <instructions>
+        1. Analyze the database schema and understand the available tables and their relationships
+        2. Create {no_of_questions} distinct, natural-sounding questions that users might ask
+        3. Ensure each question can be answered by querying the database tables
+        4. Vary the complexity and types of questions (e.g., simple lookups, aggregations, comparisons)
+        </instructions>
+
+        <response_format>
+        Provide your response as a JSON array of strings containing exactly {no_of_questions} questions.
+        No additional text, explanations, or formatting should be included outside the JSON structure.
+
+        Example format:
+        ```json
+        [
+        "What is the total revenue for Q1 2023?",
+        "Which customer made the largest purchase in the last month?",
+        ...
+        ]
+        ```
+        </response_format>
+
+        Return ONLY the JSON array with {no_of_questions} questions, without any preamble or additional explanation.
+        """
         try:
             response = self.agent(prompt)
             # Extract list of possible questions from response
@@ -292,18 +358,42 @@ Format your response as a JSON array of strings (no extra text) like:
 
         # Define the prompt, remember the agent has already been initialized and knows the Table Schema
         prompt = f"""
-User Query: {user_query}
+        <task_description>
+        You are an expert SQL query generator tasked with analyzing natural language requests and converting them into precise SQL queries when possible. Your goal is to determine if the user's request can be answered using the available database tables and generate the appropriate SQL query only when feasible.
+        </task_description>
 
-Please:
-1. Analyze if this query can be answered with the available tables
-2. If YES: Generate the appropriate SQL SELECT query
-3. If NO: Don't generate any SQL query
+        <context>
+        User Query: {user_query}
+        </context>
 
-Format your SQL query in a code block like:
-```sql
-SELECT ...
-```
-""" 
+        <instructions>
+        Please follow this structured approach:
+
+        1. **Analysis Phase**:
+        - Carefully examine the user query to understand the information being requested
+        - Review the available database tables and their schemas
+        - Determine if the requested information can be retrieved from the available tables
+
+        2. **Decision Process**:
+        - If the query CAN be answered with the available tables:
+            - Identify the relevant tables and columns needed
+            - Determine necessary joins, conditions, and aggregations
+            - Construct a syntactically correct and efficient SQL query
+            - Include appropriate WHERE clauses to filter results as specified
+            - Use proper SQL syntax with semicolons at the end
+
+        - If the query CANNOT be answered with the available tables:
+            - Explain briefly why the query cannot be fulfilled
+            - Do not attempt to generate a SQL query
+            - Suggest what additional information or tables might be needed
+
+        3. **Response Format**:
+        When providing a SQL query, format it in a code block as shown:
+        ```sql
+        SELECT ...
+        ```
+        </instructions>
+        """ 
         try:
            # Step 1: Use the agent to get the SQL for the user query
             response = self.agent(prompt)
@@ -335,16 +425,38 @@ SELECT ...
             results_preview = execution["results"][:MAX_ROWS_FOR_SQL_RESULT_DISPLAY] if execution["results"] else []
             
             summary_prompt = f"""
-SQL Query: {sql}
-Results (first {MAX_ROWS_FOR_SQL_RESULT_DISPLAY}] rows): {json.dumps(results_preview, indent=2, default=str)}
-Total Rows: {execution['row_count']}
+            <task_description>
+            You are a data analyst tasked with interpreting SQL query results and extracting meaningful insights. Your expertise in data analysis will help transform raw query results into actionable business intelligence.
+            </task_description>
 
-Please provide a concise summary of the key insights from this data.
-Focus on:
-- Main findings and patterns
-- Notable statistics or trends
-- Any interesting observations
-"""
+            <context>
+            SQL Query: 
+            {sql}
+
+            Results (first {MAX_ROWS_FOR_SQL_RESULT_DISPLAY} rows): 
+            {json.dumps(results_preview, indent=2, default=str)}
+
+            Total Rows: {execution['row_count']}
+            </context>
+
+            <instructions>
+            Please analyze the SQL query results above and provide a concise, insightful summary of the data. Your analysis should be clear, data-driven, and immediately useful for business decision-making.
+
+            Structure your response to include:
+
+            1. **Key Findings**: Identify and explain the most significant patterns or insights revealed by the data
+            
+            2. **Statistical Highlights**: Mention notable metrics, averages, outliers, or distributions that stand out
+
+            3. **Trend Analysis**: Describe any temporal patterns, growth trends, or cyclical behaviors if applicable
+            
+            4. **Comparative Insights**: Highlight meaningful differences or similarities between categories, segments, or time periods
+            
+            5. **Business Implications**: Briefly suggest what these findings might mean for business decisions or strategy
+
+            Keep your analysis concise, focused, and directly supported by the data presented. Avoid speculation beyond what the data clearly indicates.
+            </instructions>
+            """
             
             summary = self.agent(summary_prompt)
             summary_text = summary.output if hasattr(summary, 'output') else str(summary)
