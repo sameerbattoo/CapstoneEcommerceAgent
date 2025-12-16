@@ -202,13 +202,36 @@ class KnowledgeBaseAgent:
         # Use agent to generate the sample questions
         product_list = "1) Running shoes 2) Smartphone x 3) Denim Jeans 4) Winter Jacket 5) Cotton T-Shirt 6) Bluetooth Headphones"
         prompt = f"""
-User Query: Give me a list of questions that the can be answered by the knowledgebase for the following products - {product_list}. Make sure to list 2 questions per product.
+        <task_description>
+        Generate a list of questions that can be answered by the knowledge base for each product in the provided product list.
+        </task_description>
 
-Format your response as a JSON array of stringregion = aws_region os (no extra text) like:
-```json
-[]
-```
-"""
+        <input>
+        <product_list>{product_list}</product_list>
+        </input>
+
+        <instructions>
+        1. For each product in the provided product list, create 2 relevant questions that could be answered by consulting a knowledge base about that product.
+        2. Ensure questions are specific to each product's features, use cases, or common customer inquiries.
+        3. Make questions clear, concise, and directly related to information typically found in product knowledge bases.
+        4. Generate exactly 2 questions per product, no more and no less.
+        </instructions>
+
+        <response_format>
+        Return your response as a JSON array of strings containing all the generated questions, with no additional text or explanations.
+
+        Example format:
+        ```json
+        [
+        "What are the technical specifications of Product X?",
+        "How do I troubleshoot connectivity issues with Product X?",
+        ...
+        ]
+        ```
+        </response_format>
+
+        Provide your JSON array of questions immediately without any preamble or additional explanations.
+        """
 
         # Use Bedrock's built-in RAG (Retrieve and Generate)
         result = self.retriever.retrieve_and_generate(prompt)
