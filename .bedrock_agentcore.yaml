@@ -1,4 +1,4 @@
-default_agent: capstone_ecommerce_agent_cognito
+default_agent: capstone_ecomm_agent
 agents:
   capstone_agent:
     name: capstone_agent
@@ -116,7 +116,132 @@ agents:
     request_header_configuration:
       requestHeaderAllowlist:
       - Authorization
-      - X-Amzn-Bedrock-AgentCore-Runtime-Custom-Session-Id
+    oauth_configuration: null
+    api_key_env_var_name: null
+    api_key_credential_provider_name: null
+    is_generated_by_agentcore_create: false
+  capstone_ecommerce_agent:
+    name: capstone_ecommerce_agent
+    entrypoint: /Users/sbattoo/Src/CapstoneEcommerceAgent/main.py
+    deployment_type: container
+    runtime_type: null
+    platform: linux/arm64
+    container_runtime: docker
+    source_path: /Users/sbattoo/Src/CapstoneEcommerceAgent
+    aws:
+      execution_role: arn:aws:iam::175918693907:role/CapstoneECommerce-agentcore-execution-role
+      execution_role_auto_create: true
+      account: '175918693907'
+      region: us-west-2
+      ecr_repository: 175918693907.dkr.ecr.us-west-2.amazonaws.com/bedrock-agentcore-capstone_ecommerce_agent
+      ecr_auto_create: false
+      s3_path: null
+      s3_auto_create: false
+      network_configuration:
+        network_mode: VPC
+        network_mode_config:
+          security_groups:
+          - sg-06d560db4091b375c
+          subnets:
+          - subnet-0d924ff443cebd41d
+          - subnet-0463efcbc95e2d5e1
+      protocol_configuration:
+        server_protocol: HTTP
+      observability:
+        enabled: true
+      lifecycle_configuration:
+        idle_runtime_session_timeout: null
+        max_lifetime: null
+    bedrock_agentcore:
+      agent_id: capstone_ecommerce_agent-gET3CI37hd
+      agent_arn: arn:aws:bedrock-agentcore:us-west-2:175918693907:runtime/capstone_ecommerce_agent-gET3CI37hd
+      agent_session_id: null
+    codebuild:
+      project_name: bedrock-agentcore-capstone_ecommerce_agent-builder
+      execution_role: arn:aws:iam::175918693907:role/AmazonBedrockAgentCoreSDKCodeBuild-us-west-2-8aa836abe3
+      source_bucket: bedrock-agentcore-codebuild-sources-175918693907-us-west-2
+    memory:
+      mode: NO_MEMORY
+      memory_id: null
+      memory_arn: null
+      memory_name: null
+      event_expiry_days: 30
+      first_invoke_memory_check_done: false
+      was_created_by_toolkit: false
+    identity:
+      credential_providers: []
+      workload: null
+    authorizer_configuration:
+      customJWTAuthorizer:
+        discoveryUrl: https://cognito-idp.us-west-2.amazonaws.com/us-west-2_5cqnrBvAg/.well-known/openid-configuration
+        allowedClients:
+        - 2nc8c09npb6vru63mgfl7kiqb1
+    request_header_configuration:
+      requestHeaderAllowlist:
+      - Authorization
+    oauth_configuration: null
+    api_key_env_var_name: null
+    api_key_credential_provider_name: null
+    is_generated_by_agentcore_create: false
+  capstone_ecomm_agent:
+    name: capstone_ecomm_agent
+    entrypoint: /Users/sbattoo/Src/CapstoneEcommerceAgent/main.py
+    deployment_type: container
+    runtime_type: null
+    platform: linux/arm64
+    container_runtime: docker
+    source_path: /Users/sbattoo/Src/CapstoneEcommerceAgent
+    aws:
+      execution_role: arn:aws:iam::175918693907:role/CapstoneECommerce-agentcore-execution-role
+      execution_role_auto_create: true
+      account: '175918693907'
+      region: us-west-2
+      ecr_repository: 175918693907.dkr.ecr.us-west-2.amazonaws.com/bedrock-agentcore-capstone_ecomm_agent
+      ecr_auto_create: false
+      s3_path: null
+      s3_auto_create: false
+      network_configuration:
+        network_mode: VPC
+        network_mode_config:
+          security_groups:
+          - sg-06d560db4091b375c
+          subnets:
+          - subnet-0d924ff443cebd41d
+          - subnet-0463efcbc95e2d5e1
+      protocol_configuration:
+        server_protocol: HTTP
+      observability:
+        enabled: true
+      lifecycle_configuration:
+        idle_runtime_session_timeout: null
+        max_lifetime: null
+    bedrock_agentcore:
+      agent_id: capstone_ecomm_agent-iOd15C2EqB
+      agent_arn: arn:aws:bedrock-agentcore:us-west-2:175918693907:runtime/capstone_ecomm_agent-iOd15C2EqB
+      agent_session_id: null
+    codebuild:
+      project_name: bedrock-agentcore-capstone_ecomm_agent-builder
+      execution_role: arn:aws:iam::175918693907:role/AmazonBedrockAgentCoreSDKCodeBuild-us-west-2-973626fdd0
+      source_bucket: bedrock-agentcore-codebuild-sources-175918693907-us-west-2
+    memory:
+      mode: NO_MEMORY
+      memory_id: null
+      memory_arn: null
+      memory_name: null
+      event_expiry_days: 30
+      first_invoke_memory_check_done: false
+      was_created_by_toolkit: false
+    identity:
+      credential_providers: []
+      workload: null
+    authorizer_configuration:
+      customJWTAuthorizer:
+        discoveryUrl: https://cognito-idp.us-west-2.amazonaws.com/us-west-2_5cqnrBvAg/.well-known/openid-configuration
+        allowedClients:
+        - 2nc8c09npb6vru63mgfl7kiqb1
+    request_header_configuration:
+      requestHeaderAllowlist:
+      - Authorization
     oauth_configuration: null
     api_key_env_var_name: null
     api_key_credential_provider_name: null
