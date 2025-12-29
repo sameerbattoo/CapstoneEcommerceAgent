@@ -12,7 +12,7 @@ uv run agentcore configure -e main.py --vpc \
   --disable-memory \
   --deployment-type container \
   --authorizer-config '{"type":"customJWTAuthorizer","discoveryUrl":"https://cognito-idp.us-west-2.amazonaws.com/us-west-2_5cqnrBvAg/.well-known/openid-configuration","allowedClients":"2nc8c09npb6vru63mgfl7kiqb1"}' \
-  --request-header-allowlist Authorization,X-Amzn-Bedrock-AgentCore-Runtime-Session-Id \
+  --request-header-allowlist Authorization,X-Amzn-Bedrock-AgentCore-Runtime-Custom-TenantId,X-Amzn-Bedrock-AgentCore-Runtime-Custom-ActorId \
   --non-interactive
 
 uv run agentcore launch \
