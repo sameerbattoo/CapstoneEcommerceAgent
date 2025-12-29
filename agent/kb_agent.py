@@ -18,21 +18,44 @@ MAX_ROWS_FOR_RETRIVAL = 5
 def log_info(logger: logging.Logger, function: str, content: str) -> None:
     """Log each conversation turn with timestamp and optional tool calls"""
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    logger.info(f"[{timestamp}] {function}: {content[:200]}..." if len(content) > 200 else f"[{timestamp}] {function}: {content}")
+    logger.info(f"[{timestamp}] {function}: {content[:500]}..." if len(content) > 500 else f"[{timestamp}] {function}: {content}")
 
 
 class KnowledgeBaseRetriever:
     """Retrieves information from AWS Bedrock Knowledge Base."""
     
-    def __init__(self, kb_id: str, region: str, model_arn: str):
+    def __init__(self, kb_id: str, region: str, model_arn: str, logger: logging.Logger):
         self.kb_id = kb_id
         self.model_arn = model_arn
+        self.logger = logger
         self.client = boto3.client('bedrock-agent-runtime', region_name=region)
     
-    def retrieve_and_generate(self, query: str, max_results: int = MAX_ROWS_FOR_RETRIVAL) -> Dict[str, Any]:
-        """Retrieve documents and generate response using Bedrock without streaming.."""
+    def retrieve_and_generate(self, query: str, max_results: int = MAX_ROWS_FOR_RETRIVAL, tenant_id: Optional[str] = None) -> Dict[str, Any]:
+        """Retrieve documents and generate response using Bedrock without streaming.
+        
+        Args:
+            query: The user's query
+            max_results: Maximum number of results to retrieve
+            tenant_id: Optional tenant ID for filtering results by tenant_access metadata
+        """
         
         try:
+            # Build retrieval configuration
+            retrieval_config = {
+                'vectorSearchConfiguration': {
+                    'numberOfResults': max_results
+                }
+            }
+            
+            # Add filter for tenant_id
+            tenant_id_filter = tenant_id or "N/A"
+            retrieval_config['vectorSearchConfiguration']['filter'] = {
+                'equals': {
+                    'key': 'tenant_access',
+                    'value': tenant_id_filter
+                }
+            }
+                
             response = self.client.retrieve_and_generate(
                 input={
                     'text': query
@@ -42,11 +65,7 @@ class KnowledgeBaseRetriever:
                     'knowledgeBaseConfiguration': {
                         'knowledgeBaseId': self.kb_id,
                         'modelArn': self.model_arn,
-                        'retrievalConfiguration': {
-                            'vectorSearchConfiguration': {
-                                'numberOfResults': max_results
-                            }
-                        }
+                        'retrievalConfiguration': retrieval_config
                     }
                 }
             )
@@ -96,6 +115,8 @@ class KnowledgeBaseRetriever:
             }
             
         except Exception as e:
+            error_msg = f"Failed to retrieve and generate from knowledge base. Error: {str(e)}"
+            self.logger.error(f"[KnowledgeBaseRetriever] {error_msg}")
             return {
                 "success": False,
                 "error": str(e),
@@ -108,18 +129,19 @@ class KnowledgeBaseRetriever:
 class KnowledgeBaseAgent:
     """Main Knowledge Base Agent using retrieve_and_generate function with Bedrock."""
     
-    def __init__(self, logger: logging.Logger, kb_id: str, aws_region: str, model_arn: str):
+    def __init__(self, logger: logging.Logger, kb_id: str, aws_region: str, model_arn: str, tenant_id: str):
         
         # Get AWS region & other config value from environment or parameter
         self.kb_id = kb_id 
         self.region = aws_region 
         self.model_arn = model_arn
+        self.tenant_id = tenant_id
         self.logger = logger
 
-        log_info(logger, "KnowledgeBaseAgent.Init", f"Starting function, Kb Id:{kb_id}, Region:{aws_region}, Model ARN:{model_arn}")
+        log_info(logger, "KnowledgeBaseAgent.Init", f"Starting function, Kb Id:{kb_id}, Region:{aws_region}, Model ARN:{model_arn}, Tenant ID:{tenant_id}")
         
         # Initialize Knowledge Base retriever
-        self.retriever = KnowledgeBaseRetriever(self.kb_id, self.region, self.model_arn)
+        self.retriever = KnowledgeBaseRetriever(self.kb_id, self.region, self.model_arn, logger)
         log_info(logger, "KnowledgeBaseAgent.Init", f"Ending function, KnowledgeBaseRetriever initialized, Kb Id:{kb_id}")
             
     def process_query(self, user_query: str, max_results: int = MAX_ROWS_FOR_RETRIVAL) -> Dict[str, Any]:
@@ -134,10 +156,10 @@ class KnowledgeBaseAgent:
             Dictionary with response, sources, and metadata
         """
 
-        log_info(self.logger, "KnowledgeBaseAgent.process_query", f"Starting function, User Query:{user_query}")
+        log_info(self.logger, "KnowledgeBaseAgent.process_query", f"Starting function, User Query:{user_query}, max_results: {max_results}, Tenant ID:{self.tenant_id}")
         
         # Use Bedrock's built-in RAG (Retrieve and Generate)
-        result = self.retriever.retrieve_and_generate(user_query, max_results)
+        result = self.retriever.retrieve_and_generate(user_query, max_results, self.tenant_id)
 
         if not result["success"]:
             log_info(self.logger, "KnowledgeBaseAgent.process_query", f"After calling retrieve_and_generate, No results, Error Info:{result.get("error")}")
@@ -197,7 +219,7 @@ class KnowledgeBaseAgent:
     def get_sample_questions(self) -> List[str]:
         """Get a list of sample questions that can be answered from the configured knowledgebase."""
 
-        log_info(self.logger, "KnowledgeBaseAgent.get_sample_questions", f"Starting function")
+        log_info(self.logger, "KnowledgeBaseAgent.get_sample_questions", f"Starting function, Tenant ID:{self.tenant_id}")
 
         # Use agent to generate the sample questions
         product_list = "1) Running shoes 2) Smartphone x 3) Denim Jeans 4) Winter Jacket 5) Cotton T-Shirt 6) Bluetooth Headphones"
@@ -234,7 +256,7 @@ class KnowledgeBaseAgent:
         """
 
         # Use Bedrock's built-in RAG (Retrieve and Generate)
-        result = self.retriever.retrieve_and_generate(prompt)
+        result = self.retriever.retrieve_and_generate(prompt, MAX_ROWS_FOR_RETRIVAL, tenant_id=self.tenant_id)
         
         if not result["success"]:
             log_info(self.logger, "KnowledgeBaseAgent.get_sample_questions", f"After calling retrieve_and_generate, No results, Failed to query knowledge base. Error Info:{result.get("error")}")
