@@ -2,7 +2,7 @@
 
 An intelligent e-commerce assistant powered by AWS Bedrock AgentCore, featuring multi-agent orchestration, knowledge base integration, and SQL query capabilities.
 
-![Architecture](generated-diagrams/Capstone-ECommerce-Agent.png)
+![Architecture](generated-diagrams/Capstone-ECommerce-Agent V2.png)
 
 ## Overview
 
