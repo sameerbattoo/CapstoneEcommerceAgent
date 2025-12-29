@@ -1,0 +1,29 @@
+{"Question": "What is the Model numer for the Laptop Pro 15?","GroundTruth":"The model is LP15-PRO-2024."}
+{"Question": "How many cores and treads does the Laptop Pro 15 have?","GroundTruth":"The laptop has 10 cores and 12 threads."}
+{"Question": "Does the Laptop Pro 15 support wifi 7?","GroundTruth":"The laptop doesn't support wifi 7. It support 802.11ax Wi-Fi 6E (up to 2.4 Gbps)"}
+{"Question": "What is the weight of the Running Shoes and what do I need to do in terms of maintenance?","GroundTruth":"Clean shoes with mild soap and water, let air dry, void machine washing or high heat, Replace running shoes every 300–500 miles (480–800 km), Store in a cool, dry place."}
+{"Question": "How many USB-A 3.0 ports does the USB-C Hub have?","GroundTruth":"It has 3 USB-A 3.0 ports"}
+{"Question": "Does the USB-C Hub support Linux Operating System?","GroundTruth":"Yes, it supports Linux (kernel 5.4+)"}
+{"Question": "For the USB-C Hub, what is the Data Transfer speed for the SD Card Reader?","GroundTruth":"It supports Sequential read speeds up to 300 Mbps, write speeds up to 260 Mbps"}
+{"Question": "For the USB-C Hub, what's the minimum power adapter I need?","GroundTruth":"A 100W USB-C power adapter is recommended for optimal performance with simultaneous peripheral usage and device charging. However, the hub is backward compatible with 60W adapters for light usage scenarios"}
+{"Question": "What are the various sizes available for the WINTER JACKET?","GroundTruth":"It is available in the following sizes - XS (Chest:82-86 cm, Length: 70 cm, Shoulder Width: 41 cm, Sleeve Length: 78 cm), S (Chest:88-92 cm, Length: 72 cm, Shoulder Width: 43 cm, Sleeve Length: 80 cm), M (Chest:94-98 cm, Length: 74 cm, Shoulder Width: 45 cm, Sleeve Length: 82 cm),  L (Chest:100-104 cm, Length: 76 cm, Shoulder Width: 47 cm, Sleeve Length: 84 cm), XL (Chest:106-110 cm, Length: 78 cm, Shoulder Width: 49 cm, Sleeve Length: 86 cm), XXL (Chest:112-116 cm, Length: 80 cm, Shoulder Width: 51 cm, Sleeve Length: 88 cm)"}
+{"Question": "What is the Total Weight for the WINTER JACKET?","GroundTruth":"It is 680-750g (1 lb 8 oz)"}
+{"Question": "How often should I wash the WINTER Jacket?","GroundTruth":"Wash when visibly soiled (typically 1-2 times per season for regular users). Excessive washing reduces DWR effectiveness. Use spot cleaning for minor stains."}
+{"Question": "What are the target use-cases for Smartphone X?","GroundTruth":"The target use-cases are: Professional mobile computing and productivity, Content creation and multimedia consumption, Mobile gaming and entertainment, Enterprise communications and collaboration, Photography and videography"}
+{"Question": "What is the Refresh Rate and Peak Brightness for Smartphone X?","GroundTruth":"The Refresh Rate is 120Hz adaptive and Peak Brightness is 1800 nits"}
+{"Question": "Does the Smartphone X have a front camera? and what's the spec?","GroundTruth":"Yes, it has a front camera and the spec is: 12MP, f/2.2, 4K video"}
+{"Question": "What is the screen-to-body ratio for Smartphone X?","GroundTruth":"Approximately 89.8%, with minimal bezels and a centered punch-hole camera"}
+{"Question": "What are the key components of the Running Shoes","GroundTruth":"The key components include: Upper: The fabric or material covering the top of your foot, Midsole: The foam layer providing cushioning and shock absorption, Outsole: Durable rubber contacting the ground for traction and durability, Heel Counter: Reinforcement in the heel for stability, Toe Box: The front part providing space for toes, Lacing System: Allows adjustment for a snug fit"}
+{"Question": "What are the available sizes for Running Shoes, specifically for women?","GroundTruth":"Sizes avaialble: US 6-14 for Men. Women's and kids' sizes are also available."}
+{"Question": "How many belt loops does the Denim Jeans have?","GroundTruth":"It has 4-5 loops."}
+{"Question": "What the typical Fabric Blend for the Denim Jeans have?","GroundTruth":"98-100% Cotton and 0-2% Elastane (Spandex) for stretch and recovery"}
+{"Question": "Are there weight categories for the Denim Jeans?","GroundTruth":"Yes, please see the details for each category. Lightweight (Weight Range: 5-10 oz, Characteristics: Breathable, summer-weight, less durable), Mid-Weight (Weight Range: 10-14 oz, Characteristics: Optimal durability, year-round wear, standard quality), Heavy-Weight (Weight Range: 14-18 oz, Characteristics: Maximum durability, vintage appeal, warm), Extra Heavy (Weight Range: 18+ oz, Characteristics: Premium raw denim, professional workwear)"}
+{"Question": "Can I dye faded Denim Jeans?","GroundTruth":"Professional indigo redyeing restores color. Home dyeing may produce uneven results. Consult professional services for optimal outcomes."}
+{"Question": "How do I fix the zipper of the Denim Jeans?","GroundTruth":"Professional repair is recommended to preserve garment integrity. Zipper teeth replacement or installation prevents further damage."}
+
+
+
+
+
+
+

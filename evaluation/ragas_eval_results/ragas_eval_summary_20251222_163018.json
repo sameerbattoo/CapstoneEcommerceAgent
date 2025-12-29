@@ -1,0 +1,14 @@
+{
+  "timestamp": "20251222_163018",
+  "knowledge_base_id": "H36GPUOAYX",
+  "llm_generation": "anthropic.claude-3-haiku-20240307-v1:0",
+  "llm_evaluation": "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
+  "embeddings": "amazon.titan-embed-text-v2:0",
+  "num_questions": 22,
+  "metrics": {
+    "faithfulness": 0.7371212121212121,
+    "answer_relevancy": 0.7754418901067187,
+    "context_precision": 0.7727272726522727,
+    "context_recall": 0.7954545454545454
+  }
+}
