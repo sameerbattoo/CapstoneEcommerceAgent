@@ -51,6 +51,12 @@ agents:
     identity:
       credential_providers: []
       workload: null
+    aws_jwt:
+      enabled: false
+      audiences: []
+      signing_algorithm: ES384
+      issuer_url: null
+      duration_seconds: 300
     authorizer_configuration: null
     request_header_configuration: null
     oauth_configuration: null
@@ -108,6 +114,12 @@ agents:
     identity:
       credential_providers: []
       workload: null
+    aws_jwt:
+      enabled: false
+      audiences: []
+      signing_algorithm: ES384
+      issuer_url: null
+      duration_seconds: 300
     authorizer_configuration:
       customJWTAuthorizer:
         discoveryUrl: https://cognito-idp.us-west-2.amazonaws.com/us-west-2_5cqnrBvAg/.well-known/openid-configuration
@@ -171,6 +183,12 @@ agents:
     identity:
       credential_providers: []
       workload: null
+    aws_jwt:
+      enabled: false
+      audiences: []
+      signing_algorithm: ES384
+      issuer_url: null
+      duration_seconds: 300
     authorizer_configuration:
       customJWTAuthorizer:
         discoveryUrl: https://cognito-idp.us-west-2.amazonaws.com/us-west-2_5cqnrBvAg/.well-known/openid-configuration
@@ -234,14 +252,24 @@ agents:
     identity:
       credential_providers: []
       workload: null
+    aws_jwt:
+      enabled: false
+      audiences: []
+      signing_algorithm: ES384
+      issuer_url: null
+      duration_seconds: 300
     authorizer_configuration:
       customJWTAuthorizer:
         discoveryUrl: https://cognito-idp.us-west-2.amazonaws.com/us-west-2_5cqnrBvAg/.well-known/openid-configuration
         allowedClients:
         - 2nc8c09npb6vru63mgfl7kiqb1
+        allowedScopes:
+        - capstone_agent_server/read
     request_header_configuration:
       requestHeaderAllowlist:
       - Authorization
+      - X-Amzn-Bedrock-AgentCore-Runtime-Custom-TenantId
+      - X-Amzn-Bedrock-AgentCore-Runtime-Custom-ActorId
     oauth_configuration: null
     api_key_env_var_name: null
     api_key_credential_provider_name: null
