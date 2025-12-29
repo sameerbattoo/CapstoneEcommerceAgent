@@ -1,0 +1,7 @@
+{
+  "metadataAttributes": {
+    "tenant_access": ["tenantB"],
+    "doc_type": "financial",
+    "owner": "tenantB"
+  }
+}
