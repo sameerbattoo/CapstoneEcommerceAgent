@@ -2,6 +2,63 @@
 
 import streamlit as st
 import re
+import pandas as pd
+from io import StringIO
+import json
+
+
+def _render_metrics(metrics: dict):
+    """Render metrics in an expander.
+    
+    Args:
+        metrics: Dictionary containing duration, tokens, cost, and model info
+    """
+    with st.expander("💰 Token / Cost Info", expanded=True):
+        # Add custom CSS to style metrics
+        st.markdown("""
+            <style>
+            [data-testid="stMetricValue"] {
+                font-size: 0.9em !important;
+                color: #1f77b4 !important;
+                font-weight: bold !important;
+            }
+            [data-testid="stMetricLabel"] {
+                font-size: 0.9em !important;
+            }
+            </style>
+        """, unsafe_allow_html=True)
+        
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.metric(
+                label="Total Tokens",
+                value=f"{metrics['input_tokens'] + metrics['output_tokens']:,}"
+            )
+        
+        with col2:
+            st.metric(
+                label="Input Tokens",
+                value=f"{metrics['input_tokens']:,}"
+            )
+        
+        with col3:
+            st.metric(
+                label="Output Tokens",
+                value=f"{metrics['output_tokens']:,}"
+            )
+        
+        with col4:
+            st.metric(
+                label="Estimated Cost",
+                value=f"${metrics.get('cost_usd', 0.0):.4f}"
+            )
+        
+        # Additional details in smaller text with blue bold steps count
+        st.markdown(
+            f"<span style='font-size: 0.8em; color: #888;'>Model: <code>{metrics.get('model_id', 'unknown')}</code> • Steps: <span style='color: #1f77b4; font-weight: bold;'>{metrics.get('step_count', 'N/A')}</span></span>",
+            unsafe_allow_html=True
+        )
 
 
 def render_chat_messages(messages: list):
@@ -12,11 +69,90 @@ def render_chat_messages(messages: list):
     """
     for message in messages:
         thinking = message.get("thinking", None)
-        _display_message(message["role"], message["content"], thinking)
+        metrics = message.get("metrics", None)
+        _display_message(message["role"], message["content"], thinking, metrics)
 
 
-def _display_message(role: str, content: str, thinking: list = None):
-    """Display a single chat message with optional thinking process."""
+def _extract_and_render_tables(content: str) -> str:
+    """
+    Extract HTML tables from content and convert them to interactive Streamlit dataframes.
+    
+    Args:
+        content: The message content that may contain HTML tables
+        
+    Returns:
+        Modified content with table placeholders
+    """
+    # Pattern to match HTML tables wrapped in div
+    table_pattern = r'<div style="overflow-x: auto;[^>]*>.*?<table[^>]*>.*?</table>.*?</div>'
+    
+    tables = re.findall(table_pattern, content, re.DOTALL | re.IGNORECASE)
+    
+    if not tables:
+        return content
+    
+    # Process each table
+    modified_content = content
+    for idx, table_html in enumerate(tables):
+        try:
+            # Parse HTML table with pandas (lxml parser)
+            df = pd.read_html(StringIO(table_html))[0]
+            
+            # Create unique key for this table
+            table_key = f"table_{idx}"
+            
+            # Replace HTML table with placeholder
+            placeholder = f"\n\n__STREAMLIT_TABLE_{table_key}__\n\n"
+            modified_content = modified_content.replace(table_html, placeholder, 1)
+            
+            # Store dataframe in session state
+            if 'extracted_tables' not in st.session_state:
+                st.session_state.extracted_tables = {}
+            st.session_state.extracted_tables[table_key] = df
+            
+        except Exception as e:
+            # If parsing fails, keep original HTML table
+            print(f"Warning: Could not parse table {idx}: {str(e)}")
+            continue
+    
+    return modified_content
+
+
+def _render_content_with_tables(content: str):
+    """
+    Render content with embedded Streamlit dataframes where tables were detected.
+    
+    Args:
+        content: Content with table placeholders
+    """
+    # Split content by table placeholders
+    # Pattern matches: __STREAMLIT_TABLE_table_123__
+    table_placeholder_pattern = r'__STREAMLIT_TABLE_(table_\d+)__'
+    parts = re.split(table_placeholder_pattern, content)
+    
+    for i, part in enumerate(parts):
+        if i % 2 == 0:
+            # Regular content - render as markdown
+            if part.strip():
+                st.markdown(part, unsafe_allow_html=True)
+        else:
+            # Table placeholder - render as dataframe
+            # part contains the table_key (e.g., "table_0")
+            table_key = part
+            if 'extracted_tables' in st.session_state and table_key in st.session_state.extracted_tables:
+                df = st.session_state.extracted_tables[table_key]
+                
+                # Render with Streamlit's native dataframe (includes download button)
+                st.dataframe(
+                    df,
+                    use_container_width=True,
+                    hide_index=True,
+                    height=min(400, (len(df) + 1) * 35 + 3)  # Dynamic height based on rows
+                )
+
+
+def _display_message(role: str, content: str, thinking: list = None, metrics: dict = None):
+    """Display a single chat message with optional thinking process and metrics."""
     with st.chat_message(role):
         # Show thinking process if available
         if thinking and len(thinking) > 0:
@@ -36,8 +172,17 @@ def _display_message(role: str, content: str, thinking: list = None):
                     else:
                         st.write(thought_data)
         
-        # Show final answer with HTML support
-        st.markdown(content, unsafe_allow_html=True)
+        # Extract tables and render with interactive dataframes
+        if role == "assistant":
+            modified_content = _extract_and_render_tables(content)
+            _render_content_with_tables(modified_content)
+        else:
+            # User messages - render as-is
+            st.markdown(content, unsafe_allow_html=True)
+        
+        # Show metrics if available (for assistant messages)
+        if role == "assistant" and metrics:
+            _render_metrics(metrics)
 
 
 def process_agent_response(
@@ -47,7 +192,7 @@ def process_agent_response(
     access_token: str | None = None,
     tenant_id: str | None = None,
     actor_id: str | None = None
-) -> str:
+) -> tuple[str, dict]:
     """Process agent response with streaming and display thinking + answer.
     
     Args:
@@ -59,17 +204,19 @@ def process_agent_response(
         actor_id: Actor ID (optional)
         
     Returns:
-        Final answer content
+        Tuple of (final answer content, metrics data)
     """
     # Create containers for streaming display
     thinking_container = st.container()
     answer_placeholder = st.empty()
+    metrics_container = st.container()  # Separate container for metrics
     status_placeholder = st.empty()
     
     answer_content = ""
     tool_use_content = ""
     thinking_content = ""
     tool_inputs = {}
+    metrics_data = None
     tool_re = re.compile(r"^Tool:\s*(.+?)\s*Input:\s*(.*)$", re.DOTALL)
     
     # Create the thinking expander at the start
@@ -108,6 +255,13 @@ def process_agent_response(
                             thinking_content += event_data
                             thinking_placeholder.info(thinking_content + "▌")
                         
+                        elif event_type == "metrics":
+                            # Parse and store metrics data
+                            try:
+                                metrics_data = json.loads(event_data.strip())
+                            except json.JSONDecodeError:
+                                pass  # Ignore malformed metrics
+                        
                         else:
                             # Content event - add to answer
                             answer_content += event_data
@@ -115,12 +269,24 @@ def process_agent_response(
                     
                     # Final answer without cursor
                     thinking_placeholder.info(thinking_content)
-                    answer_placeholder.markdown(answer_content, unsafe_allow_html=True)
+                    
+                    # Extract tables and render with interactive dataframes
+                    modified_content = _extract_and_render_tables(answer_content)
+                    answer_placeholder.empty()  # Clear the placeholder
+                    
+                    # Render content with tables in a new container
+                    with answer_placeholder.container():
+                        _render_content_with_tables(modified_content)
                 
                 # Clear status after completion
                 status_placeholder.empty()
                 
-                return answer_content
+                # Display metrics OUTSIDE the thinking container, after the answer
+                if metrics_data:
+                    with metrics_container:
+                        _render_metrics(metrics_data)
+                
+                return answer_content, metrics_data
             
             except Exception as e:
                 from services.agentcore_client import UnauthorizedError
@@ -130,11 +296,11 @@ def process_agent_response(
                 # Handle unauthorized errors specially
                 if isinstance(e, UnauthorizedError):
                     _handle_unauthorized_error()
-                    return ""
+                    return "", None
                 
                 error_msg = f"❌ An error occurred: {str(e)}"
                 answer_placeholder.error(error_msg)
-                return error_msg
+                return error_msg, None
 
 
 def _handle_unauthorized_error():
@@ -164,10 +330,10 @@ def render_sample_questions():
         st.markdown("**Try these example questions:**")
         
         examples = [
-            "Its kinda cold today in California, what products can you suggest from your catalog?",
+            "Analyse my spend for the current year vs last per product category",
             "I am planning to gift an Electronic item. Can you suggest the two 2 products in that category based on the reviews.",
-            "List my orders along with the products in Feb 2025, how did others review these?",
-            "Show the distribution by product categories of my orders this year compared to last year.",
+            "List my orders along with the products for Feb 2025, how did others review these?",
+            "Show the distribution by product categories of my orders this year compared to other shoppers.",
             "Display my review history with ratings. Did people find my reviews useful?",
             "List the top 5 user by sales in 2025 and show their product review summary for each of them.",
             "Which customers have spent more than $1000 in the 2nd Quarter of 2025? Did they write any reviews?",
@@ -220,7 +386,7 @@ def render_chat_input(
         
         # Get agent response with streaming
         with st.chat_message("assistant"):
-            answer_content = process_agent_response(
+            answer_content, metrics_data = process_agent_response(
                 prompt,
                 agentcore_client,
                 session_id,
@@ -229,8 +395,15 @@ def render_chat_input(
                 actor_id
             )
             
-            # Save message
+            # Update session cost if metrics available
+            if metrics_data and 'cost_usd' in metrics_data:
+                if 'session_cost' not in st.session_state:
+                    st.session_state.session_cost = 0.0
+                st.session_state.session_cost += metrics_data['cost_usd']
+            
+            # Save message with metrics
             st.session_state.messages.append({
                 "role": "assistant",
-                "content": answer_content
+                "content": answer_content,
+                "metrics": metrics_data
             })
