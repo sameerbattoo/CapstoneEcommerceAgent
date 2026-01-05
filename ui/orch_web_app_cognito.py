@@ -210,7 +210,7 @@ def _process_pending_message(agentcore_client: AgentCoreClient, aws_region: str)
         with st.chat_message("assistant"):
             actor_id = get_actor_id(st.session_state.username)
             
-            answer_content = process_agent_response(
+            answer_content, metrics_data = process_agent_response(
                 last_message["content"],
                 agentcore_client,
                 st.session_state.session_id,
@@ -219,10 +219,17 @@ def _process_pending_message(agentcore_client: AgentCoreClient, aws_region: str)
                 actor_id
             )
             
-            # Save message
+            # Update session cost if metrics available
+            if metrics_data and 'cost_usd' in metrics_data:
+                if 'session_cost' not in st.session_state:
+                    st.session_state.session_cost = 0.0
+                st.session_state.session_cost += metrics_data['cost_usd']
+            
+            # Save message with metrics
             st.session_state.messages.append({
                 "role": "assistant",
-                "content": answer_content
+                "content": answer_content,
+                "metrics": metrics_data
             })
     
     st.session_state.process_last_message = False
