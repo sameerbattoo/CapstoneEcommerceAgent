@@ -156,6 +156,8 @@ class AgentCoreClient:
                             yield {"type": "tool_use", "data": data_stripped.removeprefix("[TOOL USE]")}
                         elif data_stripped.startswith("[THINKING]"):
                             yield {"type": "thinking", "data": data_stripped.removeprefix("[THINKING]")}
+                        elif data_stripped.startswith("[METRICS]"):
+                            yield {"type": "metrics", "data": data_stripped.removeprefix("[METRICS]")}
                         else:
                             yield {"type": "content", "data": data}
     
