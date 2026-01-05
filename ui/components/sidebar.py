@@ -35,11 +35,22 @@ def render_sidebar(
 def _render_user_info(username: str, tenant_id: str, session_id: str):
     """Render user information section."""
     st.header("👤 User Info")
+    
+    # Initialize session cost if not exists
+    if 'session_cost' not in st.session_state:
+        st.session_state.session_cost = 0.0
+    
+    # Display username with tenant
     st.write(f"**Username:** {username} (**{tenant_id}**)")
+    
+    # Display session with cost in blue
+    st.markdown(
+        f"**Session:** <span style='color: #1f77b4; font-weight: bold;'>(${st.session_state.session_cost:.4f})</span>",
+        unsafe_allow_html=True
+    )
     
     # Display truncated session ID as clickable link
     truncated_session = f"{session_id[:10]}...{session_id[-10:]}"
-    st.write("**Session:**")
     if st.button(
         f"🔍 {truncated_session}",
         key="session_id_btn",
@@ -66,6 +77,7 @@ def _render_action_buttons(user_auth=None):
         st.session_state.refresh_token = None
         st.session_state.messages = []
         st.session_state.session_id = str(uuid.uuid4())
+        st.session_state.session_cost = 0.0  # Reset session cost
         
         # Clear saved session
         SessionManager.clear_session()
@@ -85,6 +97,7 @@ def _render_action_buttons(user_auth=None):
     if st.button("🗑️ Clear Chat", use_container_width=True, type="secondary"):
         st.session_state.messages = []
         st.session_state.session_id = str(uuid.uuid4())
+        st.session_state.session_cost = 0.0  # Reset session cost
         st.rerun()
 
 
