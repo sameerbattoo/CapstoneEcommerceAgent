@@ -1,8 +1,24 @@
 # ECommerce Agent - Capstone Project
 
-An intelligent e-commerce assistant powered by AWS Bedrock AgentCore, featuring multi-agent orchestration, knowledge base integration, and SQL query capabilities.
+An intelligent e-commerce assistant powered by AWS Bedrock AgentCore, featuring multi-agent orchestration, knowledge base integration, and SQL query capabilities and MCP server integration wrapping existing Lambda functions.
 
-![Architecture](generated-diagrams/Capstone-ECommerce-Agent%20V2.png)
+## Version 2 Updates include:
+1) A new Agent (ChartAgent): Which is called by the SQLAgent to generate a visual representation of the data queried by SQLAgent based on the user's natural language query. This agent uses the AWS Bedrock model to generate the python code for the visualization and then uses AWS AgentCore Code Interpreter Tool to execute the generated python code in a sandbox environment to create the charts on the fly.
+2) Integrated Strands Memory Hooks for convesations with AWS AgentCore Short Term Memory. Long Term memory strategies added for User Preferences & User Facts. A new UI screen to show & semantic search the memory data (Short & Long term).
+3) Implemented the AWS Bedrock Model Evaluation and moved to Claude Haiku 4.5 as a result. Also, implemented AWS Bedrock RAG Evaluation.
+4) Implemented Multi-tenancy and made the solution ready for a ISV implementation with a Pool strategy.
+    * Unstructured Data: PDF files in S3 with <file.pdf>.metadata.json data with tenant_access info. Injested by AWS Bedrock KnowledgeBase and tenent based filter applied at the retrival time.
+    * Structured Data (Relational SQL, RDS): One schema per tenant. The SQLAgent automatically extracts tenent info from the access_token and formulates the SQL with the correct tenent.table info.
+    * Semi-Structured Data (No SQL, DynamoDB): Table with tenentId as a attribute and tenent based filter applied at runtime.
+5) Using OAuth2 based Access_Token for both Inbound and Outbound authentication for AgentCore Runtime. A Pre token generation Lambda trigger used to incorporate tenentId and custom claims into the Access_Token which is then passed from the StreamLit front-end to the AgentCore Runtime and further from the AgentCore Runtime to AgentCore Gateway to access the Lambda. The AgentCore Gateway uses the newly announced fine-grained access control to pass the tenentId to the target Lambda.
+6) Improve multi-tenancy Observability: Added functionality to track Agent invocation latency, token counts (input + output) and cost per tenant by emitting to custom CloudWatch Metrics.
+7) Implemented Semantic Caching for SQLAgent using ValKey ElastiCache, by caching generated SQL + SQL execution results + Visualization image URL to save cost and execution time for similar user queries.
+8) SlidingWindowConversationManager implemented to reduce the input token count by limiting to last 10 conversations being sent as part of the agent input context.
+9) Implemented Prompt Caching (both System prompt + Tools) for the different agents while calling the AWS Bedrock models to reduce input token counts.
+10) The Agent Promps (both system and user prompts) optimized using AWS Bedrock prompt opimization feature.
+
+## V2 Architecture Diagram
+![V2 Architecture](generated-diagrams/Capstone-ECommerce-Agent%20V2.png)
 
 ## Overview
 
@@ -42,39 +58,41 @@ This project implements a sophisticated e-commerce agent that can:
 
 ```
 .
-├── main.py                          # Main orchestrator agent
+├── main.py                         # Main entry point for the agentic app
 ├── main_ui_cognito.py              # Streamlit UI entry point
 ├── deploy_agent.sh                 # Deployment script
+├── metrics_logger.py               # Per Tenant Custom CloudWatch Metric Logger
 ├── pyproject.toml                  # Python dependencies (uv)
 ├── requirements.txt                # Pip requirements
-├── .bedrock_agentcore.yaml        # AgentCore configuration
-├── .env                           # Environment variables
+├── .bedrock_agentcore.yaml         # AgentCore configuration
+├── .env                            # Environment variables
 │
-├── agent/                         # Sub-agents
-│   ├── sql_agent.py              # SQL query agent for RDS
-│   ├── kb_agent.py               # Knowledge Base agent
-│   └── orch_agent_local.py       # Local testing orchestrator
+├── agent/                          # Sub-agents
+│   ├── sql_agent.py                # SQL query agent for RDS
+│   ├── chart_agent.py              # Chart generation agent for results from RDS
+│   ├── kb_agent.py                 # Knowledge Base agent
+│   └── orch_agent.py               # Overall orchestration agent
 │
-├── ui/                           # User interfaces
-│   ├── orch_web_app_cognito.py  # Cognito-authenticated UI
-│   └── orch_web_app_local.py    # Local testing UI
+├── ui/                             # User interfaces
+│   ├── orch_web_app_cognito.py     # Cognito-authenticated UI
+│   └── orch_web_app_local.py       # Local testing UI
 │
-├── lambda/                       # Lambda functions
-│   ├── product_reviews_api.py   # Product reviews API
+├── lambda/                         # Lambda functions
+│   ├── product_reviews_api.py      # Product reviews API
 │   ├── product_reviews_api-schema.json
-│   ├── deploy_lambda.sh         # Lambda deployment
+│   ├── deploy_lambda.sh            # Lambda deployment
 │   └── README.md
 │
-├── prereqs/                      # Infrastructure setup
-│   ├── setup_infrastructure.sh  # VPC, subnets, NAT gateway
-│   ├── deploy_dynamo_db.sh     # DynamoDB table creation
+├── prereqs/                        # Infrastructure setup
+│   ├── setup_infrastructure.sh     # VPC, subnets, NAT gateway
+│   ├── deploy_dynamo_db.sh         # DynamoDB table creation
 │   ├── db_security_group_setup.sh
-│   ├── agent_role.json         # IAM permissions
+│   ├── agent_role.json             # IAM permissions for the Agent
 │   ├── database/
-│   │   └── sample_data.sql     # RDS sample data
-│   └── kb_files/               # Knowledge Base PDFs
+│   │   └── sample_data.sql         # RDS sample data
+│   └── kb_files/                   # Knowledge Base PDFs
 │
-└── generated-diagrams/          # Architecture diagrams
+└── generated-diagrams/             # Architecture diagrams
 ```
 
 ## Prerequisites
