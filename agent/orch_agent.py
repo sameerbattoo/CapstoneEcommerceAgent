@@ -513,20 +513,21 @@ class AgentManager:
 
             **Chart Detection and Display Protocol:**
             1. After calling any tool, immediately inspect the response for a `chart_url` field
-            2. When a `chart_url` is present in the tool response, you MUST display it - this is NOT optional
-            3. Display the chart in a dedicated "Data Visualization" section immediately after the data table
-            4. Use this EXACT format (replace {{chart_url}} with the actual URL from the response):
-               ```html
-               <h3>Data Visualization</h3>
-               <img src="{{chart_url}}" alt="Data Visualization" style="max-width: 100%; height: auto; border: 1px solid #ddd; border-radius: 4px; padding: 5px;" />
-               ```
-            5. Never skip chart display - if chart_url exists, the chart MUST appear in your response
-            6. The chart should appear BEFORE the insights/summary section and AFTER the data table
+            2. If no tool is called or `chart_url` field doesn't exist in the tool response, do not invent the `chart_url` field, skip the chart display section
+            3. When a `chart_url` is present in the tool response, you MUST display it - this is NOT optional
+                - Display the chart in a dedicated "Data Visualization" section immediately after the data table
+                - Use this EXACT format (replace {{chart_url}} with the actual URL from the response):
+                ```html
+                <h3>Data Visualization</h3>
+                <img src="{{chart_url}}" alt="Data Visualization" style="max-width: 100%; height: auto; border: 1px solid #ddd; border-radius: 4px; padding: 5px;" />
+                ```
+                - The chart should appear BEFORE the insights/summary section and AFTER the data table
 
             **Verification Checklist (complete before finalizing response):**
             - ✓ Did the tool response contain a chart_url field?
             - ✓ If yes, did I include the chart image in my response?
-            - ✓ Is the chart displayed in the correct position (after table, before insights)?
+            - ✓ If yes,  Is the chart displayed in the correct position (after table, before insights)?
+            - ✓ If no, did I exclude the chart image section in my response?
             </chart_display_rules>
 
             <tool_instructions>
