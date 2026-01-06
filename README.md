@@ -129,15 +129,27 @@ aws secretsmanager create-secret \
     --secret-string '{
         "AWS_REGION": "us-west-2",
         "BEDROCK_MODEL_ID": "anthropic.claude-3-5-sonnet-20241022-v2:0",
-        "BEDROCK_MODEL_ARN": "arn:aws:bedrock:us-west-2::foundation-model/anthropic.claude-3-5-sonnet-20241022-v2:0",
         "KB_ID": "your-knowledge-base-id",
         "DB_HOST": "your-rds-endpoint",
         "DB_PORT": "5432",
         "DB_NAME": "ecommerce",
-        "DB_USER": "postgres",
+        "DB_USER": "your-db-user",
         "DB_PASSWORD": "your-password",
         "AGENTCORE_MEMORY_ID": "your-memory-id",
-        "GATEWAY_URL": "your-agentcore-gateway-url"
+        "GATEWAY_URL": "your-agentcore-gateway-url",
+        "CHART_S3_BUCKET": "capstone-ecommerce-charts",
+        "CLOUDFRONT_DOMAIN": "dbxniufackd05.cloudfront.net",
+        "VALKEY_ENDPOINT": "master.capstone-sqlagent-valkey-cache.8ot617.usw2.cache.amazonaws.com",
+        "VALKEY_PORT": "6379",
+        "VALKEY_USE_TLS" : "true",
+        "VALKEY_PASSWORD": "",
+        "CACHE_TTL_SECONDS": "36000",
+        "CACHE_SIMILARITY_THRESHOLD": "0.99",
+        "BEDROCK_EMBED_MODEL": "amazon.titan-embed-text-v2:0",
+        "CACHE_SIMILARITY_THRESHOLD_MIN": "0.70",
+        "METRICS_NAMESPACE": "CapstoneECommerceAgent/PerTenant",
+        "ENABLE_METRICS_LOGGING": "true",
+        "LOG_LEVEL": "WARNING"
     }' \
     --region us-west-2
 ```
@@ -146,19 +158,6 @@ aws secretsmanager create-secret \
 
 The agent automatically falls back to `.env` if Secrets Manager is unavailable:
 
-```bash
-AWS_REGION=us-west-2
-BEDROCK_MODEL_ID=anthropic.claude-3-5-sonnet-20241022-v2:0
-BEDROCK_MODEL_ARN=arn:aws:bedrock:us-west-2::foundation-model/anthropic.claude-3-5-sonnet-20241022-v2:0
-KB_ID=your-knowledge-base-id
-DB_HOST=your-rds-endpoint
-DB_PORT=5432
-DB_NAME=ecommerce
-DB_USER=postgres
-DB_PASSWORD=your-password
-AGENTCORE_MEMORY_ID=your-memory-id
-GATEWAY_URL=your-agentcore-gateway-url
-```
 
 **Update IAM Permissions:** Add Secrets Manager access to `prereqs/agent_role.json`:
 
