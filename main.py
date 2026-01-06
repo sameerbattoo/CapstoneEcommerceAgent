@@ -453,8 +453,8 @@ class ECommerceAgentApplication:
         logger.info(f"[{timestamp}]: user_query: {user_query}, user_email: {agent_manager.user_email}, session_id: {agent_manager.session_id}, tenant_id: {agent_manager.tenant_id}")
         
         # Get the agent from the session-specific AgentManager
-        agent = agent_manager.orchestrator_agent
-        if not agent:
+        orch_agent = agent_manager.orchestrator_agent
+        if not orch_agent:
             yield "Agent not initialized. Please try again."
             return
         
@@ -464,14 +464,16 @@ class ECommerceAgentApplication:
         start_time = time.time()
         orchestrator_input_tokens = 0
         orchestrator_output_tokens = 0
+        orchestrator_cache_read_tokens = 0
+        orchestrator_cache_write_tokens = 0
         
         # Track tool executions for metrics
         tool_start_times = {}  # tool_name -> start_time
         current_tools_in_use = set()  # Track which tools are currently executing
         
         try:
-            # Stream responses from the agent
-            async for event in agent.stream_async(user_query):
+            # Stream responses from the orch agent
+            async for event in orch_agent.stream_async(user_query):
                 if "data" in event:
                     yield event["data"]
                 
@@ -507,6 +509,8 @@ class ECommerceAgentApplication:
                                 end_time=tool_end_time,
                                 input_tokens=0,
                                 output_tokens=0,
+                                cache_read_tokens=0,
+                                cache_write_tokens=0,
                                 status="success",
                                 additional_data={
                                     "tool_name": tool_name,
@@ -522,13 +526,16 @@ class ECommerceAgentApplication:
                 elif "reasoning" in event and "reasoningText" in event:
                     yield f"\n[THINKING]{event['reasoningText']}\n"
 
-                # To capture the token counts
+                # To capture the token count for the orch agent
                 elif "result" in event:
                     result = event["result"]
                     metrics_summary = result.metrics.get_summary()
                     if metrics_summary and "accumulated_usage" in metrics_summary:
-                        orchestrator_input_tokens = metrics_summary["accumulated_usage"].get("inputTokens", 0)
-                        orchestrator_output_tokens = metrics_summary["accumulated_usage"].get("outputTokens", 0)
+                        accumulated_usage_metrics_summary = metrics_summary["accumulated_usage"]
+                        orchestrator_input_tokens = accumulated_usage_metrics_summary.get("inputTokens", 0)
+                        orchestrator_output_tokens = accumulated_usage_metrics_summary.get("outputTokens", 0)
+                        orchestrator_cache_read_tokens = accumulated_usage_metrics_summary.get("cacheReadInputTokens", 0)
+                        orchestrator_cache_write_tokens = accumulated_usage_metrics_summary.get("cacheWriteInputTokens", 0)
             
             end_time = time.time()
             
@@ -536,7 +543,9 @@ class ECommerceAgentApplication:
             agent_manager._token_accumulator_callback(
                 orchestrator_input_tokens, 
                 orchestrator_output_tokens, 
-                "orchestration_agent"
+                "orchestration_agent",
+                orchestrator_cache_read_tokens,
+                orchestrator_cache_write_tokens
             )
             
             # Get accumulated session metrics
@@ -548,19 +557,25 @@ class ECommerceAgentApplication:
             
             # Calculate cost using metrics_logger
             import metrics_logger
-            cost_usd = metrics_logger.calculate_cost(
+            cost_breakdown = metrics_logger.calculate_cost(
                 session_metrics["total_input_tokens"],
                 session_metrics["total_output_tokens"],
-                model_id
+                model_id,
+                session_metrics.get("total_cache_read_tokens", 0),
+                session_metrics.get("total_cache_write_tokens", 0)
             )
             
             metrics_data = {
                 "duration_seconds": round(duration_seconds, 2),
                 "input_tokens": session_metrics["total_input_tokens"],
                 "output_tokens": session_metrics["total_output_tokens"],
+                "cache_read_tokens": session_metrics.get("total_cache_read_tokens", 0),
+                "cache_write_tokens": session_metrics.get("total_cache_write_tokens", 0),
                 "step_count": session_metrics["step_count"],
                 "model_id": model_id,
-                "cost_usd": cost_usd
+                "cost_usd": cost_breakdown["total_cost_usd"],
+                "cache_savings_usd": cost_breakdown["cache_savings_usd"],
+                "semantic_cache_hits": session_metrics.get("semantic_cache_hits", [])
             }
             yield f"\n[METRICS]{json.dumps(metrics_data)}\n"
 
@@ -574,6 +589,8 @@ class ECommerceAgentApplication:
                 end_time=end_time,
                 input_tokens=orchestrator_input_tokens,
                 output_tokens=orchestrator_output_tokens,
+                cache_read_tokens=orchestrator_cache_read_tokens,
+                cache_write_tokens=orchestrator_cache_write_tokens,
                 status="success",
                 additional_data={
                     "user_email": agent_manager.user_email,
@@ -590,6 +607,8 @@ class ECommerceAgentApplication:
                 end_time=end_time,
                 input_tokens=session_metrics["total_input_tokens"],
                 output_tokens=session_metrics["total_output_tokens"],
+                cache_read_tokens=session_metrics.get("total_cache_read_tokens", 0),
+                cache_write_tokens=session_metrics.get("total_cache_write_tokens", 0),
                 status="success",
                 additional_data={
                     "user_email": agent_manager.user_email,
@@ -608,7 +627,9 @@ class ECommerceAgentApplication:
             agent_manager._token_accumulator_callback(
                 orchestrator_input_tokens, 
                 orchestrator_output_tokens, 
-                "orchestration_agent_error"
+                "orchestration_agent_error",
+                orchestrator_cache_read_tokens,
+                orchestrator_cache_write_tokens
             )
             
             # Get accumulated session metrics
@@ -623,6 +644,8 @@ class ECommerceAgentApplication:
                 end_time=end_time,
                 input_tokens=orchestrator_input_tokens,
                 output_tokens=orchestrator_output_tokens,
+                cache_read_tokens=orchestrator_cache_read_tokens,
+                cache_write_tokens=orchestrator_cache_write_tokens,
                 status="error",
                 additional_data={
                     "error": str(e),
@@ -640,6 +663,8 @@ class ECommerceAgentApplication:
                 end_time=end_time,
                 input_tokens=session_metrics["total_input_tokens"],
                 output_tokens=session_metrics["total_output_tokens"],
+                cache_read_tokens=session_metrics.get("total_cache_read_tokens", 0),
+                cache_write_tokens=session_metrics.get("total_cache_write_tokens", 0),
                 status="error",
                 additional_data={
                     "error": str(e),
@@ -656,19 +681,25 @@ class ECommerceAgentApplication:
             
             # Calculate cost using metrics_logger
             import metrics_logger
-            cost_usd = metrics_logger.calculate_cost(
+            cost_breakdown = metrics_logger.calculate_cost(
                 session_metrics["total_input_tokens"],
                 session_metrics["total_output_tokens"],
-                model_id
+                model_id,
+                session_metrics.get("total_cache_read_tokens", 0),
+                session_metrics.get("total_cache_write_tokens", 0)
             )
             
             metrics_data = {
                 "duration_seconds": round(duration_seconds, 2),
                 "input_tokens": session_metrics["total_input_tokens"],
                 "output_tokens": session_metrics["total_output_tokens"],
+                "cache_read_tokens": session_metrics.get("total_cache_read_tokens", 0),
+                "cache_write_tokens": session_metrics.get("total_cache_write_tokens", 0),
                 "step_count": session_metrics["step_count"],
                 "model_id": model_id,
-                "cost_usd": cost_usd,
+                "cost_usd": cost_breakdown["total_cost_usd"],
+                "cache_savings_usd": cost_breakdown["cache_savings_usd"],
+                "semantic_cache_hits": session_metrics.get("semantic_cache_hits", []),
                 "status": "error"
             }
             yield f"\n[METRICS]{json.dumps(metrics_data)}\n"
