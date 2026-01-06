@@ -11,9 +11,9 @@ def _render_metrics(metrics: dict):
     """Render metrics in an expander.
     
     Args:
-        metrics: Dictionary containing duration, tokens, cost, and model info
+        metrics: Dictionary containing duration, tokens, cost, cache info, and model info
     """
-    with st.expander("💰 Token / Cost Info", expanded=True):
+    with st.expander("💰 Bedrock Token / Cost Info (not including the AgentCore Runtime, Gateway, Memory or Code Interpreter costs)", expanded=True):
         # Add custom CSS to style metrics
         st.markdown("""
             <style>
@@ -28,37 +28,107 @@ def _render_metrics(metrics: dict):
             </style>
         """, unsafe_allow_html=True)
         
+        # First row: Main token metrics
         col1, col2, col3, col4 = st.columns(4)
+        
+        # Initialize all metrics with defaults to prevent KeyError
+        input_tokens = metrics.get('input_tokens', 0)
+        output_tokens = metrics.get('output_tokens', 0)
+        cost_usd = metrics.get('cost_usd', 0.0)
         
         with col1:
             st.metric(
                 label="Total Tokens",
-                value=f"{metrics['input_tokens'] + metrics['output_tokens']:,}"
+                value=f"{input_tokens + output_tokens:,}"
             )
         
         with col2:
             st.metric(
                 label="Input Tokens",
-                value=f"{metrics['input_tokens']:,}"
+                value=f"{input_tokens:,}"
             )
         
         with col3:
             st.metric(
                 label="Output Tokens",
-                value=f"{metrics['output_tokens']:,}"
+                value=f"{output_tokens:,}"
             )
         
         with col4:
             st.metric(
                 label="Estimated Cost",
-                value=f"${metrics.get('cost_usd', 0.0):.4f}"
+                value=f"${cost_usd:.4f}"
             )
+        
+        # Second row: Cache metrics (if cache tokens exist)
+        cache_read = metrics.get('cache_read_tokens', 0)
+        cache_write = metrics.get('cache_write_tokens', 0)
+        cache_savings = metrics.get('cache_savings_usd', 0.0)
+        
+        if cache_read > 0 or cache_write > 0 or cache_savings > 0:
+            st.markdown("---")  # Divider
+            col5, col6, col7, col8 = st.columns(4)
+            
+            with col5:
+                st.metric(
+                    label="Cache Read Tokens",
+                    value=f"{cache_read:,}",
+                    help="Tokens read from cache (90% cost savings)"
+                )
+            
+            with col6:
+                st.metric(
+                    label="Cache Write Tokens",
+                    value=f"{cache_write:,}",
+                    help="Tokens written to cache (25% cost premium)"
+                )
+            
+            with col7:
+                # Calculate cache efficiency
+                total_input = input_tokens + cache_read
+                cache_efficiency = (cache_read / total_input * 100) if total_input > 0 else 0
+                st.metric(
+                    label="Cache Hit Rate",
+                    value=f"{cache_efficiency:.1f}%",
+                    help="Percentage of input tokens served from cache"
+                )
+            
+            with col8:
+                st.metric(
+                    label="Cache Savings",
+                    value=f"${cache_savings:.4f}",
+                    help="Cost saved by using prompt caching",
+                    delta=f"-{cache_savings:.4f}" if cache_savings > 0 else None
+                )
         
         # Additional details in smaller text with blue bold steps count
         st.markdown(
             f"<span style='font-size: 0.8em; color: #888;'>Model: <code>{metrics.get('model_id', 'unknown')}</code> • Steps: <span style='color: #1f77b4; font-weight: bold;'>{metrics.get('step_count', 'N/A')}</span></span>",
             unsafe_allow_html=True
         )
+        
+        # Display semantic cache hits if any
+        semantic_cache_hits = metrics.get('semantic_cache_hits', [])
+        if semantic_cache_hits:
+            # Build cache hit message
+            cache_messages = []
+            for hit in semantic_cache_hits:
+                tier = hit.get('tier', 1)
+                tier_label = "High Sematic Similarity" if tier == 1 else "SQL Similarity"
+                # Format similarity score to 3 decimal places
+                similarity_score = hit.get('cache_hit_similarity_score', 0.0)
+                tier_label += f" (Similarity Score: {similarity_score:.3f})"
+                cache_messages.append(f"Tier {tier} ({tier_label})")
+            
+            cache_text = ", ".join(cache_messages)
+            
+            # Use default background with green text and border (no white background)
+            st.markdown(
+                f"<div style='margin-top: 8px; padding: 8px; border-left: 4px solid #4caf50; border-radius: 4px;'>"
+                f"<span style='font-size: 0.85em; color: #4caf50;'>⚡ <strong>Semantic Cache Hit:</strong> {cache_text} - Query results served from Valkey cache</span>"
+                f"</div>",
+                unsafe_allow_html=True
+            )
 
 
 def render_chat_messages(messages: list):
