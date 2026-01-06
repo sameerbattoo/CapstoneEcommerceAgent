@@ -114,18 +114,18 @@ def _render_metrics(metrics: dict):
             cache_messages = []
             for hit in semantic_cache_hits:
                 tier = hit.get('tier', 1)
-                tier_label = "High Sematic Similarity" if tier == 1 else "SQL Similarity"
-                # Format similarity score to 3 decimal places
+                tier_label = "(High Semantic Similarity)" if tier == 1 else "(Semantic Similarity with same SQL)"
+                # Format similarity score as percentage with 2 decimal places
                 similarity_score = hit.get('cache_hit_similarity_score', 0.0)
-                tier_label += f" (Similarity Score: {similarity_score:.3f})"
-                cache_messages.append(f"Tier {tier} ({tier_label})")
+                tier_label += f", Semantic Similarity Score: {similarity_score * 100:.2f}%"
+                cache_messages.append(f"Tier {tier} {tier_label}")
             
             cache_text = ", ".join(cache_messages)
             
             # Use default background with green text and border (no white background)
             st.markdown(
                 f"<div style='margin-top: 8px; padding: 8px; border-left: 4px solid #4caf50; border-radius: 4px;'>"
-                f"<span style='font-size: 0.85em; color: #4caf50;'>⚡ <strong>Semantic Cache Hit:</strong> {cache_text} - Query results served from Valkey cache</span>"
+                f"<span style='font-size: 0.85em; color: #4caf50;'>⚡ <strong>Semantic Cache Hit:</strong> {cache_text} - Query results served from Valkey cache, saving you time and hopefully tokens😊</span>"
                 f"</div>",
                 unsafe_allow_html=True
             )
