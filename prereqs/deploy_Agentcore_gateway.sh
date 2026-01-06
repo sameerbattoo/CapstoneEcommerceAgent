@@ -275,9 +275,9 @@ else
     exit 1
 fi
 
-# Wait for role to be available
-print_status "Waiting for role to be fully available..."
-sleep 10
+# Wait for role to be available (IAM has eventual consistency)
+print_status "Waiting for role to propagate across AWS..."
+sleep 15
 
 # Verify role creation and policies
 print_status "Verifying role configuration..."
@@ -310,7 +310,41 @@ echo "Custom Policy: $POLICY_ARN"
 print_status "✅ IAM role creation completed successfully!"
 
 # Create the AgentCore Gateway
-print_status "Creating AgentCore Gateway: $GATEWAY_NAME"
+print_header "=== Creating AgentCore Gateway ==="
+
+# Check if gateway already exists
+print_status "Checking if gateway already exists..."
+EXISTING_GATEWAY=$(aws bedrock-agentcore-control list-gateways \
+    --region "$REGION" \
+    --query "gateways[?name=='$GATEWAY_NAME'].gatewayId" \
+    --output text 2>/dev/null || echo "")
+
+if [ -n "$EXISTING_GATEWAY" ]; then
+    print_warning "Gateway '$GATEWAY_NAME' already exists with ID: $EXISTING_GATEWAY"
+    
+    # Get gateway details
+    GATEWAY_DETAILS=$(aws bedrock-agentcore-control get-gateway \
+        --gateway-identifier "$EXISTING_GATEWAY" \
+        --region "$REGION" \
+        --output json 2>/dev/null)
+    
+    if [ $? -eq 0 ] && [ "$JQ_AVAILABLE" = true ]; then
+        GATEWAY_ARN=$(echo "$GATEWAY_DETAILS" | jq -r '.gatewayArn')
+        GATEWAY_URL=$(echo "$GATEWAY_DETAILS" | jq -r '.gatewayUrl // empty')
+        
+        print_status "Existing Gateway ARN: $GATEWAY_ARN"
+        if [ -n "$GATEWAY_URL" ]; then
+            print_status "Existing Gateway URL: $GATEWAY_URL"
+        fi
+    fi
+    
+    print_status "✅ Using existing gateway"
+    GATEWAY_ID="$EXISTING_GATEWAY"
+else
+    print_status "Creating new AgentCore Gateway: $GATEWAY_NAME"
+fi
+
+if [ -z "$EXISTING_GATEWAY" ]; then
 
 # Create authorizer configuration for OAuth
 cat > authorizer-config.json << EOF
@@ -331,70 +365,90 @@ if [ "$USE_TOOLKIT" = true ]; then
         --name "$GATEWAY_NAME" \
         --region "$REGION" \
         --role-arn "$ROLE_ARN" \
-        --authorizer-config  file://authorizer-config.json \
-        --enable_semantic_search false 2>&1)
+        --authorizer-config file://authorizer-config.json 2>&1)
     
     if [ $? -eq 0 ]; then
         print_status "Gateway created successfully using starter toolkit"
         echo "$GATEWAY_OUTPUT"
         
         # Extract gateway ID from output if possible
-        GATEWAY_ID=$(echo "$GATEWAY_OUTPUT" | grep -o 'gateway/[a-zA-Z0-9]\{10\}' | cut -d'/' -f2 || echo "")
+        GATEWAY_ID=$(echo "$GATEWAY_OUTPUT" | grep -oE '[a-zA-Z0-9-]+-[a-zA-Z0-9]{10}' | head -1 || echo "")
+        GATEWAY_ARN=$(echo "$GATEWAY_OUTPUT" | grep -oE 'arn:aws:bedrock-agentcore:[^:]+:[0-9]+:gateway/[a-zA-Z0-9-]+' | head -1 || echo "")
+        GATEWAY_URL=$(echo "$GATEWAY_OUTPUT" | grep -oE 'https://[^[:space:]]+\.gateway\.bedrock-agentcore\.[^[:space:]]+' | head -1 || echo "")
     else
         print_error "Failed to create gateway using starter toolkit"
         echo "$GATEWAY_OUTPUT"
+        rm -f authorizer-config.json
         exit 1
     fi
 else
     # Using AWS CLI directly
     print_status "Using AWS CLI to create gateway..."
 
+    # Create complete gateway request JSON
+    cat > gateway-request.json << EOF
+{
+    "name": "$GATEWAY_NAME",
+    "description": "$GATEWAY_DESCRIPTION",
+    "roleArn": "$ROLE_ARN",
+    "protocolType": "$PROTOCOL_TYPE",
+    "authorizerType": "$AUTHORIZER_TYPE",
+    "authorizerConfiguration": $(cat authorizer-config.json)
+}
+EOF
+
     # Create the gateway
     GATEWAY_RESPONSE=$(aws bedrock-agentcore-control create-gateway \
-        --name "$GATEWAY_NAME" \
-        --description "$GATEWAY_DESCRIPTION" \
-        --role-arn "$ROLE_ARN" \
-        --protocol-type "$PROTOCOL_TYPE" \
-        --authorizer-type "$AUTHORIZER_TYPE" \
-        --authorizer-configuration file://authorizer-config.json \
+        --cli-input-json file://gateway-request.json \
         --region "$REGION" \
-        --output json)
+        --output json 2>&1)
 
     if [ $? -eq 0 ]; then
         print_status "Gateway created successfully"
         
-        # Extract gateway information
-        GATEWAY_ARN=$(echo "$GATEWAY_RESPONSE" | jq -r '.gatewayArn')
-        GATEWAY_ID=$(echo "$GATEWAY_ARN" | grep -o '[a-zA-Z0-9]\{10\}$')
-        GATEWAY_URL=$(echo "$GATEWAY_RESPONSE" | jq -r '.gatewayUrl // empty')
-        
-        print_status "Gateway ARN: $GATEWAY_ARN"
-        print_status "Gateway ID: $GATEWAY_ID"
-        if [ -n "$GATEWAY_URL" ]; then
-            print_status "Gateway URL: $GATEWAY_URL"
+        if [ "$JQ_AVAILABLE" = true ]; then
+            # Extract gateway information
+            GATEWAY_ARN=$(echo "$GATEWAY_RESPONSE" | jq -r '.gatewayArn')
+            GATEWAY_ID=$(echo "$GATEWAY_ARN" | grep -oE '[a-zA-Z0-9-]+-[a-zA-Z0-9]{10}$')
+            GATEWAY_URL=$(echo "$GATEWAY_RESPONSE" | jq -r '.gatewayUrl // empty')
+            
+            print_status "Gateway ARN: $GATEWAY_ARN"
+            print_status "Gateway ID: $GATEWAY_ID"
+            if [ -n "$GATEWAY_URL" ]; then
+                print_status "Gateway URL: $GATEWAY_URL"
+            fi
+        else
+            print_warning "jq not available - cannot parse gateway details"
+            echo "$GATEWAY_RESPONSE"
         fi
     else
         print_error "Failed to create gateway"
         echo "$GATEWAY_RESPONSE"
+        rm -f authorizer-config.json gateway-request.json
         exit 1
     fi
+    
+    # Clean up request file
+    rm -f gateway-request.json
 fi
 
-# Clean up temporary file
-rm authorizer-config.json
+# Clean up authorizer config file
+rm -f authorizer-config.json
 
-# Verify the gateway was created with the expected ID
-if [ -n "$GATEWAY_ID" ] && [ "$GATEWAY_ID" = "capstone-ecommerce-reviews-gateway-oauth-jnnukgjvgo" ]; then
-    print_status "✅ Gateway created with the expected ID: $GATEWAY_ID"
-elif [ -n "$GATEWAY_ID" ]; then
-    print_warning "⚠️  Gateway created but with different ID: $GATEWAY_ID"
-    print_warning "Expected ID: capstone-ecommerce-reviews-gateway-oauth-jnnukgjvgo"
+fi  # End of if [ -z "$EXISTING_GATEWAY" ]$')
+# Verify gateway information
+if [ -n "$GATEWAY_ID" ]; then
+    print_status "✅ Gateway ready with ID: $GATEWAY_ID"
+    
+    # Note: Gateway IDs are randomly generated by AWS
+    # The expected ID in comments is from a previous deployment
+    print_status "Note: Gateway ID is randomly generated by AWS"
 else
     print_warning "Could not extract gateway ID from response"
 fi
 
 # Output summary
-print_status "=== AgentCore Gateway Creation Summary ==="
+print_header "=== AgentCore Gateway Summary ==="
 echo "Gateway Name: $GATEWAY_NAME"
 echo "Region: $REGION"
 echo "Protocol Type: $PROTOCOL_TYPE"
@@ -402,10 +456,13 @@ echo "Authorizer Type: $AUTHORIZER_TYPE"
 echo "IAM Role: $ROLE_ARN"
 if [ -n "$GATEWAY_ID" ]; then
     echo "Gateway ID: $GATEWAY_ID"
-    echo "Expected ARN: arn:aws:bedrock-agentcore:$REGION:$ACCOUNT_ID:gateway/$GATEWAY_ID"
+    echo "Gateway ARN: arn:aws:bedrock-agentcore:$REGION:$ACCOUNT_ID:gateway/$GATEWAY_ID"
+fi
+if [ -n "$GATEWAY_URL" ]; then
+    echo "Gateway URL: $GATEWAY_URL"
 fi
 
-print_status "AgentCore Gateway creation completed!"
+print_status "AgentCore Gateway setup completed!"
 
 print_header "=== Creating Targets for AgentCore Gateway ==="
 
@@ -464,20 +521,22 @@ create_lambda_target() {
     local target_name=$1
     local lambda_arn=$2
     local description=$3
-    local inlinelambdaschema=$4
+    local schema_file=$4
     
     print_status "Creating Lambda target: $target_name"
     
     if [ "$USE_TOOLKIT" = true ]; then
         # Using starter toolkit
+        # Read schema file content
+        local schema_content=$(cat "$schema_file")
+        
         TARGET_OUTPUT=$(bedrock-agentcore-starter-toolkit gateway create-mcp-gateway-target \
-            --gateway-arn "$GATEWAY_ARN" \
-            --gateway-url "$GATEWAY_URL" \
-            --role-arn "$ROLE_ARN" \
+            --gateway-identifier "$GATEWAY_ID" \
             --name "$target_name" \
             --target-type lambda \
-            --target-payload "{\"lambdaArn\": \"$lambda_arn\", 
-                "toolSchema": \"$inlinelambdaschema\"}" 2>&1)
+            --lambda-arn "$lambda_arn" \
+            --tool-schema "$schema_content" \
+            --region "$REGION" 2>&1)
         
         if [ $? -eq 0 ]; then
             print_status "✅ Lambda target '$target_name' created successfully"
@@ -495,7 +554,8 @@ create_lambda_target() {
     "description": "$description",
     "targetConfiguration": {
         "lambdaTargetConfiguration": {
-            "lambdaArn": "$lambda_arn"
+            "lambdaArn": "$lambda_arn",
+            "toolSchema": $(cat "$schema_file")
         }
     }
 }
@@ -528,12 +588,33 @@ EOF
 # Create Lambda targets for e-commerce reviews CRUD operations
 print_header "Creating Lambda Targets for ProductReviewLambda"
 
+# Ensure gateway ID is available
+if [ -z "$GATEWAY_ID" ]; then
+    print_error "Gateway ID not available. Cannot create targets."
+    rm -f inline-lambda-schema.json
+    exit 1
+fi
+
 # Create Reviews Lambda Target
 create_lambda_target \
     "ProductReviewLambda" \
     "arn:aws:lambda:us-west-2:175918693907:function:CapstoneEcommerceProductReviewsAPI:$LATEST" \
     "Lambda function for getting reviews" \
-    file://inline-lambda-schema.json
+    "inline-lambda-schema.json"
 
 # Clean up temporary file
-rm inline-lambda-schema.json
+rm -f inline-lambda-schema.json
+
+# Final summary
+print_header "=== Deployment Complete ==="
+print_status "Gateway Name: $GATEWAY_NAME"
+print_status "Gateway ID: $GATEWAY_ID"
+if [ -n "$GATEWAY_URL" ]; then
+    print_status "Gateway URL: $GATEWAY_URL"
+fi
+print_status "Targets Created: ${#CREATED_TARGETS[@]}"
+for target in "${CREATED_TARGETS[@]}"; do
+    echo "  - $target"
+done
+
+print_status "✅ All components deployed successfully!"
