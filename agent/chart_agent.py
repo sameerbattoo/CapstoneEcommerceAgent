@@ -66,7 +66,20 @@ class ChartAgent:
         
         # Step 2: Build system prompt
         system_prompt = self._build_system_prompt()
-        log_info(self.logger, "ChartAgent.Init", "Step 2: Built system prompt")
+        
+        # DIAGNOSTIC: Log system prompt token count for cache validation
+        prompt_length = len(system_prompt)
+        estimated_tokens = prompt_length // 4  # Rough estimate: 1 token ≈ 4 characters
+        log_info(self.logger, "ChartAgent.Init", 
+                f"Step 2: Built system prompt (length: {prompt_length} chars, ~{estimated_tokens} tokens)")
+        
+        if estimated_tokens < 1024:
+            self.logger.warning(
+                f"Chart Agent system prompt may be too short for prompt caching. "
+                f"Estimated ~{estimated_tokens} tokens, but minimum 1,024 tokens required for Claude Sonnet 4.5. "
+                f"Cache checkpoint will be IGNORED by AWS if below minimum. "
+                f"Consider adding more examples or instructions to reach minimum token count."
+            )
 
         # Step 3: Create Strands agent with Bedrock model and tools
         self.agent = Agent(
@@ -608,9 +621,15 @@ class ChartAgent:
             end_time = time.time()
             processing_duration_in_secs =  abs(end_time - start_time)
             summary = code_response.metrics.get_summary()
+            total_input_tokens = 0
+            total_output_tokens = 0
+            cache_read_tokens = 0
+            cache_write_tokens = 0
             if summary and "accumulated_usage" in summary:
                 total_input_tokens  = summary["accumulated_usage"].get("inputTokens",0)
                 total_output_tokens = summary["accumulated_usage"].get("outputTokens",0)
+                cache_read_tokens = summary["accumulated_usage"].get("cacheReadInputTokens", 0)
+                cache_write_tokens = summary["accumulated_usage"].get("cacheWriteInputTokens", 0)
            
             if not python_match:
                 log_info(self.logger, "SQLAgent._generate_visualization_code", 
@@ -625,6 +644,8 @@ class ChartAgent:
                     end_time=end_time,
                     input_tokens=total_input_tokens,
                     output_tokens=total_output_tokens,
+                    cache_read_tokens=cache_read_tokens,
+                    cache_write_tokens=cache_write_tokens,
                     status="success",
                     additional_data={
                         "code_generated": False,
@@ -634,7 +655,7 @@ class ChartAgent:
                 
                 # Report tokens to parent via callback
                 if self.token_callback:
-                    self.token_callback(total_input_tokens, total_output_tokens, "chart_code_generation")
+                    self.token_callback(total_input_tokens, total_output_tokens, "chart_code_generation", cache_read_tokens, cache_write_tokens)
                 
                 return None
             
@@ -649,6 +670,8 @@ class ChartAgent:
                 end_time=end_time,
                 input_tokens=total_input_tokens,
                 output_tokens=total_output_tokens,
+                cache_read_tokens=cache_read_tokens,
+                cache_write_tokens=cache_write_tokens,
                 status="success",
                 additional_data={
                     "code_generated": True,
@@ -660,7 +683,7 @@ class ChartAgent:
             
             # Report tokens to parent via callback
             if self.token_callback:
-                self.token_callback(total_input_tokens, total_output_tokens, "chart_code_generation")
+                self.token_callback(total_input_tokens, total_output_tokens, "chart_code_generation", cache_read_tokens, cache_write_tokens)
 
             return code
             
@@ -677,6 +700,8 @@ class ChartAgent:
                 end_time=end_time,
                 input_tokens=0,
                 output_tokens=0,
+                cache_read_tokens=0,
+                cache_write_tokens=0,
                 status="error",
                 additional_data={
                     "error": str(e),
@@ -708,6 +733,8 @@ class ChartAgent:
                 end_time=end_time,
                 input_tokens=0,
                 output_tokens=0,
+                cache_read_tokens=0,
+                cache_write_tokens=0,
                 status="success",
                 additional_data={
                     "chart_generated": False,
@@ -746,6 +773,8 @@ class ChartAgent:
                     end_time=end_time,
                     input_tokens=0,
                     output_tokens=0,
+                    cache_read_tokens=0,
+                    cache_write_tokens=0,
                     status="success",
                     additional_data={
                         "chart_generated": True,
@@ -766,6 +795,8 @@ class ChartAgent:
                     end_time=end_time,
                     input_tokens=0,
                     output_tokens=0,
+                    cache_read_tokens=0,
+                    cache_write_tokens=0,
                     status="error",
                     additional_data={
                         "chart_generated": False,
@@ -790,6 +821,8 @@ class ChartAgent:
                 end_time=end_time,
                 input_tokens=0,
                 output_tokens=0,
+                cache_read_tokens=0,
+                cache_write_tokens=0,
                 status="error",
                 additional_data={
                     "error": str(e),
