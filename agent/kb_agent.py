@@ -144,23 +144,27 @@ class KnowledgeBaseRetriever:
             Use only the information from the documents to answer the question. If the documents don't contain enough information, say so.
             Cite the document numbers,  when referencing specific information."""
             
-            user_message = f"""Context from knowledge base:
-
-            {context}
-
+            user_message = f"""
             Question: {query}
-
             Please answer the question based on the context provided above."""
                        
             converse_response = bedrock_runtime.converse(
                 modelId=self.model_id,
+                # With Prompt Caching enabled for retrieved doc chunks & System prompt
                 messages=[
                     {
                         'role': 'user',
-                        'content': [{'text': user_message}]
+                        'content': [
+                            {'text': f"Context from knowledge base:\n\n{context}\n\n"},
+                            {"cachePoint": {"type": "default"}},
+                            {'text': user_message}
+                        ]
                     }
                 ],
-                system=[{'text': system_prompt}],
+                system=[
+                        {'text': system_prompt},
+                        {"cachePoint": {"type": "default"}}
+                        ],
                 inferenceConfig={
                     'maxTokens': 2048,
                     'temperature': 0.7
@@ -174,12 +178,14 @@ class KnowledgeBaseRetriever:
             usage = converse_response.get('usage', {})
             total_input_tokens = usage.get('inputTokens', 0)
             total_output_tokens = usage.get('outputTokens', 0)
-            
+            cache_read_tokens = usage.get("cacheReadInputTokens", 0)
+            cache_write_tokens = usage.get("cacheWriteInputTokens", 0)
+
             end_time = time.time()
             processing_duration_in_secs = abs(end_time - start_time)
 
             log_info(self.logger, "KnowledgeBaseRetriever.retrieve_and_generate", 
-                    f"Duration_In_Sec: {processing_duration_in_secs:.2f}, Input_Token_Count: {total_input_tokens}, Output_Token_Count: {total_output_tokens}, tenant_id: {tenant_id}, Retrieved_Docs: {len(retrieved_docs)}")
+                    f"Duration_In_Sec: {processing_duration_in_secs:.2f}, Input_Token_Count: {total_input_tokens}, Output_Token_Count: {total_output_tokens}, cache_read_tokens: {cache_read_tokens}, cache_write_tokens: {cache_write_tokens}, tenant_id: {tenant_id}, Retrieved_Docs: {len(retrieved_docs)}")
 
             return {
                 "success": True,
@@ -188,7 +194,9 @@ class KnowledgeBaseRetriever:
                 "citation_count": len(citations),
                 "session_id": None,  # No session ID with this approach
                 "input_tokens": total_input_tokens,
-                "output_tokens": total_output_tokens
+                "output_tokens": total_output_tokens,
+                "cache_read_tokens": cache_read_tokens,
+                "cache_write_tokens": cache_write_tokens
             }
             
         except Exception as e:
@@ -201,7 +209,9 @@ class KnowledgeBaseRetriever:
                 "citations": [],
                 "citation_count": 0,
                 "input_tokens": 0,
-                "output_tokens": 0
+                "output_tokens": 0,
+                "cache_read_tokens": 0,
+                "cache_write_tokens": 0
             }
 
 
@@ -292,6 +302,8 @@ class KnowledgeBaseAgent:
                 end_time=end_time,
                 input_tokens=result.get("input_tokens", 0),
                 output_tokens=result.get("output_tokens", 0),
+                cache_read_tokens=result.get("cache_read_tokens", 0),
+                cache_write_tokens=result.get("cache_write_tokens", 0),
                 status="success",
                 additional_data={
                     "retrieved_docs": len(sources),
@@ -305,7 +317,9 @@ class KnowledgeBaseAgent:
                 self.token_callback(
                     result.get("input_tokens", 0), 
                     result.get("output_tokens", 0), 
-                    "kb_agent_execution"
+                    "kb_agent_execution",
+                    result.get("cache_read_tokens", 0),
+                    result.get("cache_write_tokens", 0)
                 )
 
             return {
@@ -328,6 +342,8 @@ class KnowledgeBaseAgent:
                 end_time=end_time,
                 input_tokens=0,
                 output_tokens=0,
+                cache_read_tokens=0,
+                cache_write_tokens=0,
                 status="error",
                 additional_data={
                     "error": str(e),
@@ -423,6 +439,8 @@ class KnowledgeBaseAgent:
                 end_time=end_time,
                 input_tokens=result.get("input_tokens", 0),
                 output_tokens=result.get("output_tokens", 0),
+                cache_read_tokens=0,  # KB agent doesn't use prompt caching
+                cache_write_tokens=0,  # KB agent doesn't use prompt caching
                 status="success",
                 additional_data={
                     "questions_generated": len(question_list),
@@ -435,7 +453,9 @@ class KnowledgeBaseAgent:
                 self.token_callback(
                     result.get("input_tokens", 0), 
                     result.get("output_tokens", 0), 
-                    "kb_sample_questions"
+                    "kb_sample_questions",
+                    0,  # KB agent doesn't use prompt caching
+                    0   # KB agent doesn't use prompt caching
                 )
 
             log_info(self.logger, "KnowledgeBaseAgent.get_sample_questions", f"Ending function, Question List:{str(question_list)}")
@@ -454,6 +474,8 @@ class KnowledgeBaseAgent:
                 end_time=end_time,
                 input_tokens=0,
                 output_tokens=0,
+                cache_read_tokens=0,
+                cache_write_tokens=0,
                 status="error",
                 additional_data={
                     "error": str(e),
