@@ -31,6 +31,8 @@ logger = logging.getLogger("eCommerceAgent")
 # Module-level app instance reference - set by initialize_orchestrator
 _app_instance_ref = None
 
+
+
 #=====================================================================================
 # UTILITY FUNCTIONS
 #=====================================================================================
@@ -46,7 +48,9 @@ def log_conversation(role: str, content: str, tool_calls: Optional[List] = None)
         for call in tool_calls:
             logger.info(f"  Tool used: {call['name']} with args: {json.dumps(call['args'])}")
 
-
+MAX_LAST_CONVERSATIONS = 3
+MAX_FACTS = 5
+MAX_PREFERENCES = 5
 
 class ECommerceMemoryHook(HookProvider):
     """Memory hook for persisting conversations to AgentCore Memory."""
@@ -78,12 +82,12 @@ class ECommerceMemoryHook(HookProvider):
     def on_agent_initialized(self, event: AgentInitializedEvent):
         """Load recent conversation history when agent starts."""
         try:
-            # Load the last 10 conversation turns from memory
+            # Load the last 3 conversation turns from memory
             recent_turns = self.memory_client.get_last_k_turns(
                 memory_id=self.memory_id,
                 actor_id=self.actor_id,
                 session_id=self.session_id,
-                k=10,
+                k=MAX_LAST_CONVERSATIONS,
             )
             
             if recent_turns:
@@ -112,20 +116,20 @@ class ECommerceMemoryHook(HookProvider):
     def _add_context_to_system_prompt(self, event: AgentInitializedEvent):
         """Add user preferences and facts to system prompt."""
         try:
-            # Get user preferences, top 10
+            # Get user preferences, top 5
             preferences = self.memory_client.retrieve_memories(
                 memory_id=self.memory_id,
                 namespace=f"/users/{self.actor_id}/preferences",
                 query="What does the user prefer? What are their settings and product choices, preferred products?",
-                top_k=5
+                top_k=MAX_PREFERENCES
             )
             
-            # Get user facts, top 10
+            # Get user facts, top 5
             facts = self.memory_client.retrieve_memories(
                 memory_id=self.memory_id,
                 namespace=f"/users/{self.actor_id}/facts",
                 query="What information do we know about the user? User email, location, past purchases, product reviews.",
-                top_k=5
+                top_k=MAX_FACTS
             )
             
             # Build context string
@@ -241,11 +245,14 @@ class AgentManager:
         self._session_metrics = {
             "total_input_tokens": 0,
             "total_output_tokens": 0,
+            "total_cache_read_tokens": 0,
+            "total_cache_write_tokens": 0,
             "step_count": 0,
-            "session_start_time": None
+            "session_start_time": None,
+            "semantic_cache_hits": []  # Track semantic cache hits for UI display
         }
     
-    def _token_accumulator_callback(self, input_tokens: int, output_tokens: int, step_name: str = "unknown"):
+    def _token_accumulator_callback(self, input_tokens: int, output_tokens: int, step_name: str = "unknown", cache_read_tokens: int = 0, cache_write_tokens: int = 0):
         """
         Callback function for sub-agents to report token usage.
         This accumulates tokens across all steps for end-to-end metrics.
@@ -254,22 +261,49 @@ class AgentManager:
             input_tokens: Number of input tokens consumed
             output_tokens: Number of output tokens generated
             step_name: Name of the step reporting tokens (for debugging)
+            cache_read_tokens: Number of tokens read from cache
+            cache_write_tokens: Number of tokens written to cache
         """
         self._session_metrics["total_input_tokens"] += input_tokens
         self._session_metrics["total_output_tokens"] += output_tokens
+        self._session_metrics["total_cache_read_tokens"] += cache_read_tokens
+        self._session_metrics["total_cache_write_tokens"] += cache_write_tokens
         self._session_metrics["step_count"] += 1
         self.logger.debug(f"Token accumulator: step={step_name}, input={input_tokens}, output={output_tokens}, "
+                         f"cache_read={cache_read_tokens}, cache_write={cache_write_tokens}, "
                          f"total_input={self._session_metrics['total_input_tokens']}, "
-                         f"total_output={self._session_metrics['total_output_tokens']}")
+                         f"total_output={self._session_metrics['total_output_tokens']}, "
+                         f"total_cache_read={self._session_metrics['total_cache_read_tokens']}, "
+                         f"total_cache_write={self._session_metrics['total_cache_write_tokens']}")
     
     def reset_session_metrics(self):
         """Reset session metrics for a new query."""
         self._session_metrics = {
             "total_input_tokens": 0,
             "total_output_tokens": 0,
+            "total_cache_read_tokens": 0,
+            "total_cache_write_tokens": 0,
             "step_count": 0,
-            "session_start_time": time.time()
+            "session_start_time": time.time(),
+            "semantic_cache_hits": []  # Reset cache hits for new query
         }
+    
+    def record_semantic_cache_hit(self, cache_tier: int, step_name: str = "sql_query", cache_hit_similarity_score: float = 0.0):
+        """
+        Record a semantic cache hit for display in UI.
+        
+        Args:
+            cache_tier: 1 for high similarity, 2 for SQL validation
+            step_name: Name of the step that hit cache
+            cache_hit_similarity_score: similarity_score for semantic search
+        """
+        self._session_metrics["semantic_cache_hits"].append({
+            "tier": cache_tier,
+            "step": step_name,
+            "cache_hit_similarity_score": cache_hit_similarity_score,
+            "timestamp": time.time()
+        })
+        self.logger.info(f"Recorded semantic cache hit: tier={cache_tier}, step={step_name}, cache_hit_similarity_score={cache_hit_similarity_score}")
     
     def get_session_metrics(self) -> Dict[str, Any]:
         """Get accumulated session metrics."""
@@ -657,10 +691,29 @@ class AgentManager:
         # Build system prompt using self.user_email
         system_prompt = self._build_system_prompt(max_sql_rows, max_dynamo_rows)
         
+        # DIAGNOSTIC: Log system prompt token count for cache validation
+        prompt_length = len(system_prompt)
+        estimated_tokens = prompt_length // 4  # Rough estimate: 1 token ≈ 4 characters
+        self.logger.info(
+            f"Orchestrator system prompt: {prompt_length} chars, ~{estimated_tokens} tokens. "
+            f"Tools count: {len(all_tools)}. "
+            f"Total estimated tokens (prompt + tools): ~{estimated_tokens + len(all_tools) * 100}"
+        )
+        
+        if estimated_tokens < 1024:
+            self.logger.warning(
+                f"Orchestrator system prompt may be too short for prompt caching. "
+                f"Estimated ~{estimated_tokens} tokens, but minimum 1,024 tokens required. "
+                f"With {len(all_tools)} tools, total should exceed minimum. "
+                f"If cache_read_tokens and cache_write_tokens are 0, increase prompt size."
+            )
+        
         # Create Bedrock model with reasoning
         bedrock_model = BedrockModel(
             model_id=self.config['bedrock_model_id'],
             #========== For Claude model ===============
+            # NOTE: cache_tools parameter enables tool caching at the Strands framework level
+            # This adds a cache checkpoint after the tools array in the Converse API request
             cache_tools="default", # Using tool caching with BedrockModel
             additional_request_fields={
                 "thinking": {
@@ -688,7 +741,7 @@ class AgentManager:
 
         # Configure conversation management for production
         conversation_manager = SlidingWindowConversationManager(
-            window_size=10,  # Limit history size
+            window_size=MAX_LAST_CONVERSATIONS,  # Limit history size
         )
 
         # Define system prompt with cache points
@@ -825,6 +878,15 @@ def get_answers_for_structured_data(user_query: str, tool_context: ToolContext) 
         response = agent_manager.sql_agent.process_query(user_query)
         end_time = time.time()
         logger.info(f"Request processed in {end_time - start_time:.2f} seconds in the structured assistant")
+        
+        # Record semantic cache hit if it occurred
+        if response.get("cache_hit", False):
+            agent_manager.record_semantic_cache_hit(
+                cache_tier=response.get("cache_tier", 1),
+                step_name="sql_query",
+                cache_hit_similarity_score=response.get("cache_hit_similarity_score", 0.0)
+            )
+        
         return response
 
     except Exception as e:
@@ -855,10 +917,12 @@ def get_answers_for_unstructured_data(user_query: str, tool_context: ToolContext
     
     # Look up the AgentManager from the global app instance
     app_instance = get_app_instance()
+    logger.info(f"Available session_ids in agent_managers: {list(app_instance.agent_managers.keys())}")
     agent_manager = app_instance.agent_managers.get(session_id)
     
     if not agent_manager:
         logger.error(f"AgentManager not found for session_id: {session_id}")
+        logger.error(f"Available sessions: {list(app_instance.agent_managers.keys())}")
         return {"message": {"content": "I'm sorry, I encountered a configuration error. Please try again later."}}
 
     log_conversation("User", f"user_query= {user_query}, for the user_email={agent_manager.user_email} for tenant_id={agent_manager.tenant_id}")
@@ -898,10 +962,12 @@ def get_default_questions(user_query: str, tool_context: ToolContext) -> Dict[st
     
     # Look up the AgentManager from the global app instance
     app_instance = get_app_instance()
+    logger.info(f"Available session_ids in agent_managers: {list(app_instance.agent_managers.keys())}")
     agent_manager = app_instance.agent_managers.get(session_id)
     
     if not agent_manager:
         logger.error(f"AgentManager not found for session_id: {session_id}")
+        logger.error(f"Available sessions: {list(app_instance.agent_managers.keys())}")
         return {"message": {"content": "I'm sorry, I encountered a configuration error. Please try again later."}}
 
     log_conversation("User", f"user_query= {user_query}, for the user_email={agent_manager.user_email} for tenant_id={agent_manager.tenant_id}")
