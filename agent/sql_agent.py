@@ -740,7 +740,22 @@ class SQLAgent:
         
         # Step 4: Build system prompt with schema context
         system_prompt = self._build_system_prompt()
-        log_info(logger, "SQLAgent.Init", f"Step 4: Built system prompt")
+        
+        # DIAGNOSTIC: Log system prompt token count for cache validation
+        # AWS requires minimum 1,024 tokens for Claude Sonnet 4.5 (4,096 for Haiku)
+        # If below minimum, cache checkpoint will be silently ignored
+        prompt_length = len(system_prompt)
+        estimated_tokens = prompt_length // 4  # Rough estimate: 1 token ≈ 4 characters
+        log_info(logger, "SQLAgent.Init", 
+                f"Step 4: Built system prompt (length: {prompt_length} chars, ~{estimated_tokens} tokens)")
+        
+        if estimated_tokens < 1024:
+            logger.warning(
+                f"SQL Agent system prompt may be too short for prompt caching. "
+                f"Estimated ~{estimated_tokens} tokens, but minimum 1,024 tokens required for Claude Sonnet 4.5. "
+                f"Cache checkpoint will be IGNORED by AWS if below minimum. "
+                f"Consider adding more schema context or examples to reach minimum token count."
+            )
         
         # Step 5: Create Strands agent with Bedrock model and tools
         self.agent = Agent(
@@ -1002,9 +1017,13 @@ class SQLAgent:
             end_time = time.time()
             processing_duration_in_secs = abs(end_time - start_time)
             summary = response.metrics.get_summary()
+            cache_read_tokens = 0
+            cache_write_tokens = 0
             if summary and "accumulated_usage" in summary:
                 total_input_tokens  = summary["accumulated_usage"].get("inputTokens",0)
                 total_output_tokens = summary["accumulated_usage"].get("outputTokens",0)
+                cache_read_tokens = summary["accumulated_usage"].get("cacheReadInputTokens", 0)
+                cache_write_tokens = summary["accumulated_usage"].get("cacheWriteInputTokens", 0)
 
             # Emit step metrics
             self.logger.emit_step_metrics(
@@ -1015,6 +1034,8 @@ class SQLAgent:
                 end_time=end_time,
                 input_tokens=total_input_tokens,
                 output_tokens=total_output_tokens,
+                cache_read_tokens=cache_read_tokens,
+                cache_write_tokens=cache_write_tokens,
                 status="success",
                 additional_data={
                     "questions_generated": len(question_list),
@@ -1024,7 +1045,7 @@ class SQLAgent:
             
             # Report tokens to parent via callback
             if self.token_callback:
-                self.token_callback(total_input_tokens, total_output_tokens, "sql_sample_questions")
+                self.token_callback(total_input_tokens, total_output_tokens, "sql_sample_questions", cache_read_tokens, cache_write_tokens)
 
             return question_list
 
@@ -1041,6 +1062,8 @@ class SQLAgent:
                 end_time=end_time,
                 input_tokens=0,
                 output_tokens=0,
+                cache_read_tokens=0,
+                cache_write_tokens=0,
                 status="error",
                 additional_data={
                     "error": str(e)
@@ -1088,9 +1111,13 @@ class SQLAgent:
             end_time = time.time()
             processing_duration_in_secs = abs(end_time - start_time)
             summary = response.metrics.get_summary()
+            cache_read_tokens = 0
+            cache_write_tokens = 0
             if summary and "accumulated_usage" in summary:
                 total_input_tokens  = summary["accumulated_usage"].get("inputTokens",0)
                 total_output_tokens = summary["accumulated_usage"].get("outputTokens",0)
+                cache_read_tokens = summary["accumulated_usage"].get("cacheReadInputTokens", 0)
+                cache_write_tokens = summary["accumulated_usage"].get("cacheWriteInputTokens", 0)
             
             if not sql_match:
                 log_info(self.logger, "SQLAgent._generate_sql_from_query", 
@@ -1105,6 +1132,8 @@ class SQLAgent:
                     end_time=end_time,
                     input_tokens=total_input_tokens,
                     output_tokens=total_output_tokens,
+                    cache_read_tokens=cache_read_tokens,
+                    cache_write_tokens=cache_write_tokens,
                     status="success",
                     additional_data={
                         "sql_generated": False,
@@ -1114,7 +1143,7 @@ class SQLAgent:
                 
                 # Report tokens to parent via callback
                 if self.token_callback:
-                    self.token_callback(total_input_tokens, total_output_tokens, "sql_generation")
+                    self.token_callback(total_input_tokens, total_output_tokens, "sql_generation", cache_read_tokens, cache_write_tokens)
                 
                 return None
             
@@ -1129,6 +1158,8 @@ class SQLAgent:
                 end_time=end_time,
                 input_tokens=total_input_tokens,
                 output_tokens=total_output_tokens,
+                cache_read_tokens=cache_read_tokens,
+                cache_write_tokens=cache_write_tokens,
                 status="success",
                 additional_data={
                     "sql_generated": True,
@@ -1138,7 +1169,7 @@ class SQLAgent:
             
             # Report tokens to parent via callback
             if self.token_callback:
-                self.token_callback(total_input_tokens, total_output_tokens, "sql_generation")
+                self.token_callback(total_input_tokens, total_output_tokens, "sql_generation", cache_read_tokens, cache_write_tokens)
 
             return sql
             
@@ -1155,6 +1186,8 @@ class SQLAgent:
                 end_time=end_time,
                 input_tokens=0,
                 output_tokens=0,
+                cache_read_tokens=0,
+                cache_write_tokens=0,
                 status="error",
                 additional_data={
                     "error": str(e)
@@ -1192,6 +1225,8 @@ class SQLAgent:
                     end_time=end_time,
                     input_tokens=0,
                     output_tokens=0,
+                    cache_read_tokens=0,
+                    cache_write_tokens=0,
                     status="success",
                     additional_data={
                         "cache_hit": True,
@@ -1211,7 +1246,8 @@ class SQLAgent:
                     "summary": "",
                     "chart_url": cached_result['chart_url'],
                     "cache_hit": True,
-                    "cache_tier": cached_result.get('tier', 1)
+                    "cache_tier": cached_result.get('tier', 1),
+                    "cache_hit_similarity_score": cached_result.get('similarity_score', 0)
                 }
             
             log_info(self.logger, "SQLAgent.process_query", "Tier 1 cache miss - generating SQL")
@@ -1228,7 +1264,8 @@ class SQLAgent:
                     "sql": "",
                     "results": [],
                     "row_count": 0,
-                    "chart_url": ""
+                    "chart_url": "",
+                    "cache_hit": False
                 }
             
             # Step 1.5: Check Tier 2 cache with SQL validation
@@ -1248,6 +1285,8 @@ class SQLAgent:
                     end_time=end_time,
                     input_tokens=0,
                     output_tokens=0,
+                    cache_read_tokens=0,
+                    cache_write_tokens=0,
                     status="success",
                     additional_data={
                         "cache_hit": True,
@@ -1267,7 +1306,8 @@ class SQLAgent:
                     "summary": "",
                     "chart_url": tier2_cached['chart_url'],
                     "cache_hit": True,
-                    "cache_tier": 2
+                    "cache_tier": 2,
+                    "cache_hit_similarity_score": tier2_cached.get('similarity_score', 0)
                 }
             
             log_info(self.logger, "SQLAgent.process_query", "Tier 2 cache miss - executing query")
@@ -1316,6 +1356,8 @@ class SQLAgent:
                 end_time=end_time,
                 input_tokens=0,
                 output_tokens=0,
+                cache_read_tokens=0,
+                cache_write_tokens=0,
                 status="success",
                 additional_data={
                     "cache_hit": False,
@@ -1350,6 +1392,8 @@ class SQLAgent:
                 end_time=end_time,
                 input_tokens=0,
                 output_tokens=0,
+                cache_read_tokens=0,
+                cache_write_tokens=0,
                 status="error",
                 additional_data={
                     "cache_hit": False,
