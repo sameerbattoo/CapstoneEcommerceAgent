@@ -252,7 +252,7 @@ class AgentManager:
             "semantic_cache_hits": []  # Track semantic cache hits for UI display
         }
     
-    def _token_accumulator_callback(self, input_tokens: int, output_tokens: int, step_name: str = "unknown", cache_read_tokens: int = 0, cache_write_tokens: int = 0):
+    def token_accumulator_callback(self, input_tokens: int, output_tokens: int, step_name: str = "unknown", cache_read_tokens: int = 0, cache_write_tokens: int = 0):
         """
         Callback function for sub-agents to report token usage.
         This accumulates tokens across all steps for end-to-end metrics.
@@ -361,7 +361,7 @@ class AgentManager:
                 cloudfront_domain=self.config.get('cloudfront_domain'),  # Pass CloudFront domain if configured
                 valkey_config=self.config.get('valkey_config'),  # Pass Valkey configuration
                 session_id=self._session_id,  # Pass session_id for metrics
-                token_callback=self._token_accumulator_callback,  # Pass callback for token accumulation
+                token_callback=self.token_accumulator_callback,  # Pass callback for token accumulation
                 chart_agent=self.chart_agent  # Pass chart_agent reference for visualization
             )
             
@@ -382,7 +382,7 @@ class AgentManager:
                 self.config['bedrock_model_id'],
                 self._tenant_id,
                 session_id=self._session_id,  # Pass session_id for metrics
-                token_callback=self._token_accumulator_callback  # Pass callback for token accumulation
+                token_callback=self.token_accumulator_callback  # Pass callback for token accumulation
             )
         return self._kb_agent
     
@@ -398,7 +398,7 @@ class AgentManager:
                 self.config['chart_s3_bucket'],
                 cloudfront_domain=self.config.get('cloudfront_domain'),
                 session_id=self._session_id,  # Pass session_id for metrics
-                token_callback=self._token_accumulator_callback  # Pass callback for token accumulation
+                token_callback=self.token_accumulator_callback  # Pass callback for token accumulation
             )
         return self._chart_agent
     
@@ -757,7 +757,7 @@ class AgentManager:
         agent = Agent(
             model=bedrock_model,
             tools=all_tools,
-            hooks=[memory_hook],
+            hooks=[memory_hook],  # Only memory hook
             system_prompt=system_content, # System prompt with cache points
             conversation_manager=conversation_manager,
             # Store only session_id in agent state (serializable)
@@ -769,6 +769,8 @@ class AgentManager:
        
     def cleanup(self) -> None:
         """Clean up resources."""
+      
+        # Clean up MCP client
         if self._mcp_client and self._mcp_session_active:
             try:
                 self._mcp_client.__exit__(None, None, None)
