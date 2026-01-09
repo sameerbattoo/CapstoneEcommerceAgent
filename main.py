@@ -517,6 +517,9 @@ class ECommerceAgentApplication:
                                     "tool_type": "mcp"
                                 }
                             )
+
+                            # Report tokens to parent for the MCP tool (Reviews)
+                            agent_manager.token_accumulator_callback(0, 0, f"mcp_tool_{tool_name}", 0, 0)
                             
                             # Remove from tracking
                             del tool_start_times[tool_name]
@@ -540,7 +543,7 @@ class ECommerceAgentApplication:
             end_time = time.time()
             
             # Add orchestrator tokens to session total
-            agent_manager._token_accumulator_callback(
+            agent_manager.token_accumulator_callback(
                 orchestrator_input_tokens, 
                 orchestrator_output_tokens, 
                 "orchestration_agent",
@@ -624,7 +627,7 @@ class ECommerceAgentApplication:
             self.logger.error(error_msg)
             
             # Add orchestrator tokens even on error
-            agent_manager._token_accumulator_callback(
+            agent_manager.token_accumulator_callback(
                 orchestrator_input_tokens, 
                 orchestrator_output_tokens, 
                 "orchestration_agent_error",
