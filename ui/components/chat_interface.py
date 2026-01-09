@@ -400,10 +400,10 @@ def render_sample_questions():
         st.markdown("**Try these example questions:**")
         
         examples = [
-            "Analyse my spend for the current year vs last per product category",
+            "Analyse my spend for the year 2025 vs 2024 per product category",
             "I am planning to gift an Electronic item. Can you suggest the two 2 products in that category based on the reviews.",
             "List my orders along with the products for Feb 2025, how did others review these?",
-            "Show the distribution by product categories of my orders this year compared to other shoppers.",
+            "Show my order counts by product categories for the year 2024 compared to other shoppers.",
             "Display my review history with ratings. Did people find my reviews useful?",
             "List the top 5 user by sales in 2025 and show their product review summary for each of them.",
             "Which customers have spent more than $1000 in the 2nd Quarter of 2025? Did they write any reviews?",
