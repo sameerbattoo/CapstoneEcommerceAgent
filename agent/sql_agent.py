@@ -211,7 +211,7 @@ class ValkeyCache:
             self.logger.error(f"Failed to generate embedding: {str(e)}")
             return None
     
-    def check_cache(self, user_query: str, tenant_id: str, generated_sql: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    def check_cache(self, user_query: str, tenant_id: str, generated_sql: Optional[str] = None, visual_requested: bool = False) -> Optional[Dict[str, Any]]:
         """
         Check if a semantically similar query exists in cache with optional SQL validation.
         
@@ -223,6 +223,7 @@ class ValkeyCache:
             user_query: User's natural language question
             tenant_id: Tenant ID for isolation
             generated_sql: Optional SQL query for Tier 2 validation. If None, only Tier 1 check is performed.
+            visual_requested: Optional. If the user has explicitoy asked for visuals
             
         Returns:
             Cached results dictionary if cache hit, None if cache miss
@@ -356,8 +357,9 @@ class ValkeyCache:
                 if similarity_score >= self.similarity_threshold_min:
                     self.logger.info(f"Tier 2 candidate found with similarity {similarity_score:.4f}, validating SQL...")
                     
-                    # Extract cached SQL
+                    # Extract cached SQL & if visual requested
                     cached_sql = cached_doc.get('sql_query', '')
+                    cached_visual_requested = cached_doc.get('visual_requested', False)
                     
                     # Normalize and compare SQL
                     normalized_cached = self._normalize_sql(cached_sql)
@@ -368,9 +370,10 @@ class ValkeyCache:
                     self.logger.info(f"  Cached SQL (normalized, len={len(normalized_cached)}): {normalized_cached[:500]}{'...' if len(normalized_cached) > 500 else ''}")
                     self.logger.info(f"  Generated SQL (normalized, len={len(normalized_generated)}): {normalized_generated[:500]}{'...' if len(normalized_generated) > 500 else ''}")
                     self.logger.info(f"  Match: {normalized_cached == normalized_generated}")
+                    self.logger.info(f"  Cached Visual Requested: {cached_visual_requested}, Now Visual Requested: {visual_requested}")
                     
-                    if normalized_cached == normalized_generated:
-                        # SQL matches - Tier 2 cache hit!
+                    if normalized_cached == normalized_generated and cached_visual_requested == visual_requested:
+                        # SQL & visual_requested matches- Tier 2 cache hit!
                         self.logger.info(f"Tier 2 CACHE HIT! Similarity {similarity_score:.4f} + SQL match")
                         
                         # Extract all cached data
@@ -412,6 +415,7 @@ class ValkeyCache:
         tenant_id: str,
         sql: str,
         results: List[Dict[str, Any]],
+        visual_requested: bool,
         chart_url: Optional[str],
         row_count: int
     ) -> None:
@@ -456,6 +460,7 @@ class ValkeyCache:
                 'question_embedding': query_embedding,
                 'sql_query': sql,
                 'results': json.dumps(limited_results, default=str),
+                'visual_requested': visual_requested,
                 'chart_url': chart_url or '',
                 'row_count': row_count,
                 'timestamp': int(time.time())
@@ -764,7 +769,6 @@ class SQLAgent:
                 f"SQL Agent system prompt may be too short for prompt caching. "
                 f"Estimated ~{estimated_tokens} tokens, but minimum 1,024 tokens required for Claude Sonnet 4.5. "
                 f"Cache checkpoint will be IGNORED by AWS if below minimum. "
-                f"Consider adding more schema context or examples to reach minimum token count."
             )
         
         # Step 5: Create Strands agent with Bedrock model and tools
@@ -1064,7 +1068,7 @@ class SQLAgent:
             
             raise Exception(f"Failed to query SQL database for sample questions. Error Info: {str(e)}")
     
-    def _generate_sql_from_query(self, user_query: str) -> Optional[str]:
+    def _generate_sql_from_query(self, user_query: str, user_email: str) -> Optional[str]:
         """Generate SQL query from natural language user query.
         
         Returns:
@@ -1072,8 +1076,9 @@ class SQLAgent:
         """
         sql_prompt = f"""
         <task_description>
-        You are an expert SQL query generator tasked with analyzing natural language requests and converting them into precise SQL queries when possible. 
-        Your goal is to determine if the user's request can be answered using the available database tables and generate the appropriate SQL query only when feasible.
+        - You are an expert SQL query generator tasked with analyzing natural language requests and converting them into precise SQL queries when possible. 
+        - Your goal is to determine if the user's request can be answered using the available database tables and generate the appropriate SQL query only when feasible.
+        - For queries about "my orders" "my products", "my shipments" or any query intent related to the current user JOIN the {self.tenant_id}.Customers TABLE add a WHERE clause: `{self.tenant_id}.customers.email='{user_email}'`
         </task_description>
 
         <context>
@@ -1187,10 +1192,38 @@ class SQLAgent:
             )
             
             return None
-    
+
+    # Keywords that indicate explicit chart request
+    CHART_KEYWORDS = [
+        'chart', 'graph', 'plot', 'visualize', 'visualization', 
+        'draw', 'display as graph', 'show me a chart', 'create a graph',
+        'bar chart', 'line chart', 'pie chart', 'histogram', 'scatter'
+    ]
+
+    def _has_explicit_chart_request(self, user_query: str) -> bool:
+        """
+        Check if the user query explicitly requests a chart/visualization.
+        
+        Args:
+            user_query: The user's original query
+            
+        Returns:
+            True if user explicitly requested a chart, False otherwise
+        """
+        query_lower = user_query.lower()
+
+        visual_requested = any(keyword in query_lower for keyword in self.CHART_KEYWORDS)
+
+        # Pre-filter: Only generate charts for explicit requests
+        if not visual_requested:
+            log_info(self.logger, "SQLAgent._has_explicit_chart_request", 
+                    f"Skipping chart generation - no explicit chart request in query: '{user_query[:200]}...'")
+            
+        return visual_requested
+        
 
     
-    def process_query(self, user_query: str) -> Dict[str, Any]:
+    def process_query(self, user_query: str, user_email: str) -> Dict[str, Any]:
         """Process user query through the agent pipeline with semantic caching."""
         
         log_info(self.logger, "SQLAgent.process_query", 
@@ -1200,8 +1233,11 @@ class SQLAgent:
         start_time = time.time()
         
         try:
+
+            visual_requested = self._has_explicit_chart_request(user_query)
+
             # Step 0: Check Tier 1 cache (high similarity, no SQL validation)
-            cached_result = self.cache.check_cache(user_query, self.tenant_id, generated_sql=None)
+            cached_result = self.cache.check_cache(user_query, self.tenant_id, generated_sql=None, visual_requested = visual_requested)
             
             if cached_result:
                 end_time = time.time()
@@ -1245,7 +1281,7 @@ class SQLAgent:
             log_info(self.logger, "SQLAgent.process_query", "Tier 1 cache miss - generating SQL")
             
             # Step 1: Generate SQL from user query
-            sql = self._generate_sql_from_query(user_query)
+            sql = self._generate_sql_from_query(user_query, user_email)
             
             if not sql:
                 # No SQL generated - query cannot be answered or needs clarification
@@ -1261,7 +1297,7 @@ class SQLAgent:
                 }
             
             # Step 1.5: Check Tier 2 cache with SQL validation
-            tier2_cached = self.cache.check_cache(user_query, self.tenant_id, generated_sql=sql)
+            tier2_cached = self.cache.check_cache(user_query, self.tenant_id, generated_sql=sql, visual_requested = visual_requested)
             
             if tier2_cached:
                 end_time = time.time()
@@ -1314,17 +1350,19 @@ class SQLAgent:
             if execution and "results" in execution:
                 limited_sql_results = execution["results"][:100]
             
-            # Step 3: Generate chart visualization
-            chart_result = self.chart_agent.generate_chart(
-                user_query, 
-                sql, 
-                limited_sql_results, 
-                execution['row_count']
-            )
-            chart_url = chart_result.get("chart_url") if chart_result else None
+            chart_url = None # Initialize
+            # Step 3: Generate chart visualization if asked
+            if visual_requested:
+                chart_result = self.chart_agent.generate_chart(
+                    user_query, 
+                    sql, 
+                    limited_sql_results, 
+                    execution['row_count']
+                )
+                chart_url = chart_result.get("chart_url") if chart_result else None
 
-            log_info(self.logger, "SQLAgent.process_query", 
-                    f"Step 3: Generated Chart, Chart_Url: {chart_url}")
+                log_info(self.logger, "SQLAgent.process_query", 
+                        f"Step 3: Generated Chart, Chart_Url: {chart_url}")
             
             # Step 4: Store in cache for future queries
             if execution["results"]:  # Only cache if we have results
@@ -1333,6 +1371,7 @@ class SQLAgent:
                     self.tenant_id,
                     sql,
                     limited_sql_results, # Only cache the top 100 rows
+                    visual_requested,
                     chart_url,
                     execution["row_count"]
                 )
@@ -1394,3 +1433,299 @@ class SQLAgent:
             )
             
             raise Exception(f"Failed to query SQL database. Error Info: {str(e)}")
+
+
+class SQLAgentOptimized(SQLAgent):
+    """Optimized SQL Agent with compressed schema and basic prompt for improved performance."""
+    
+    # Override the base class functionality
+    def _get_schema_summary(self) -> str:
+        """Get an optimized, compacted summary of available tables using OptimizeTableSchema.
+        
+        This method overrides the parent class to provide a compressed schema representation
+        that reduces token usage while maintaining all essential information for SQL generation.
+        """
+        optimized_schemas = []
+        for table, stmt in self.create_statements.items():
+            try:
+                # Use OptimizeTableSchema with compression for maximum compaction
+                optimized_stmt = SQLAgentOptimized._optimizeTableSchema(stmt, self.logger, compress=True)
+                optimized_schemas.append(f"-- Table: {table}\n{optimized_stmt}")
+            except Exception as e:
+                self.logger.warning(f"Failed to optimize schema for table {table}: {str(e)}")
+                # Fallback to original statement if optimization fails
+                optimized_schemas.append(f"-- Table: {table}\n{stmt}")
+        
+        return "\n\n".join(optimized_schemas)
+    
+    # Override the base class functionality
+    def _build_system_prompt(self) -> str:
+        """Build a basic, optimized system prompt using compressed schema context.
+        
+        This method overrides the parent class to provide a more concise prompt
+        that focuses on essential SQL generation rules while using the optimized schema.
+        """
+        # This should use the optimized schema from _get_schema_summary() and provide
+        # a streamlined set of instructions focused on core SQL generation requirements
+        """Build a basic system prompt using optimized schema context."""
+        optimized_schema_context = self._get_schema_summary()  # Use optimized version
+
+        return f"""
+        You are an expert SQL query generator for PostgreSQL databases. Convert natural language questions into precise SQL queries.
+
+        DATABASE SCHEMA:
+        {optimized_schema_context}
+
+        RULES:
+        1. Generate SELECT queries ONLY
+        2. ALL table references MUST include schema prefix: {self.tenant_id}.table_name
+        3. Use proper JOIN conditions with matching data types (ID to ID)
+        4. Use single quotes for string literals
+        5. Ensure all non-aggregated columns in SELECT appear in the GROUP BY clause
+        6. For order status filtering, use ONLY these exact values: 'delivered', 'processing', or 'shipped'
+        """
+
+    ## ======= Helper Static functions for to optimize the generated sql ==================
+    @staticmethod
+    def _optimizeTableSchema(create_statement: str, logger: logging.Logger, compress: bool = False) -> str:
+        """
+        Optimizes a CREATE TABLE statement for LLM SQL generation by:
+        1. Removing non-essential constraints (NOT NULL, DEFAULT)
+        2. Converting to "Schema on a String" format
+        3. Optionally compressing the output for maximum brevity
+        
+        Args:
+            create_statement (str): The original CREATE TABLE statement
+            logger (logging.Logger): Logger reference for debugging
+            compress (bool): Whether to apply additional compression
+            
+        Returns:
+            str: Optimized schema in "Schema on a String" format
+        """
+        try:
+            logger.info(f"Starting schema optimization for SQL: {create_statement}")
+            
+            # Step 1: Remove non-essential constraints
+            optimized_statement = SQLAgentOptimized._remove_non_essential_constraints(create_statement, logger)
+            
+            # Step 2: Convert to "Schema on a String" format
+            schema_string = SQLAgentOptimized._convert_to_schema_string(optimized_statement, logger)
+            
+            # Step 3: Apply compression if requested
+            if compress:
+                schema_string = SQLAgentOptimized._compress_schema_string(schema_string, logger)
+            
+            logger.info(f"Schema optimization completed successfully, optimized SQL: {schema_string}")
+            return schema_string
+            
+        except Exception as e:
+            logger.error(f"Error optimizing schema: {str(e)}")
+            return create_statement  # Return original if optimization fails
+
+    @staticmethod
+    def _remove_non_essential_constraints(create_statement: str, logger: logging.Logger) -> str:
+        """
+        Remove NOT NULL and DEFAULT constraints from CREATE TABLE statement.
+        Optimized version with single-pass regex and compiled patterns.
+        """
+        logger.debug("Removing non-essential constraints")
+        
+        # Remove NOT NULL constraints first
+        statement = re.sub(r'\s+NOT\s+NULL', '', create_statement, flags=re.IGNORECASE)
+        
+        # Remove DEFAULT constraints with different patterns
+        # 1. DEFAULT with function calls like nextval('seq'::regclass)
+        statement = re.sub(r'\s+DEFAULT\s+[a-zA-Z_][a-zA-Z0-9_]*\([^)]*\)(?:::[a-zA-Z_][a-zA-Z0-9_]*)?(?=\s*[,)])', '', statement, flags=re.IGNORECASE)
+        
+        # 2. DEFAULT with quoted strings
+        statement = re.sub(r"\s+DEFAULT\s+'[^']*'(?=\s*[,)])", '', statement, flags=re.IGNORECASE)
+        statement = re.sub(r'\s+DEFAULT\s+"[^"]*"(?=\s*[,)])', '', statement, flags=re.IGNORECASE)
+        
+        # 3. DEFAULT with numbers (including decimals)
+        statement = re.sub(r'\s+DEFAULT\s+\d+(?:\.\d+)?(?=\s*[,)])', '', statement, flags=re.IGNORECASE)
+        
+        # 4. DEFAULT with keywords like CURRENT_TIMESTAMP
+        statement = re.sub(r'\s+DEFAULT\s+[A-Z_]+(?=\s*[,)])', '', statement, flags=re.IGNORECASE)
+        
+        # Single cleanup pass for whitespace and commas
+        statement = re.sub(r'\s+', ' ', statement)  # Normalize whitespace
+        statement = re.sub(r'\s*,\s*', ', ', statement)  # Normalize comma spacing
+        statement = re.sub(r',\s*,', ',', statement)  # Remove double commas
+        statement = re.sub(r',\s*\)', ')', statement)  # Remove trailing commas
+        
+        return statement.strip()
+
+    @staticmethod
+    def _convert_to_schema_string(create_statement: str, logger: logging.Logger) -> str:
+        """
+        Convert CREATE TABLE statement to "Schema on a String" format.
+        Optimized version with compiled regex patterns and single-pass processing.
+        """
+        logger.debug("Converting to schema string format")
+        
+        # Pre-compiled regex patterns for better performance
+        table_pattern = re.compile(r'CREATE\s+TABLE\s+([^\s\(]+)', re.IGNORECASE)
+        paren_pattern = re.compile(r'\((.*)\)', re.DOTALL)
+        pk_pattern = re.compile(r'PRIMARY\s+KEY\s*\(\s*([^)]+)\s*\)', re.IGNORECASE)
+        constraint_pattern = re.compile(r'^(PRIMARY\s+KEY|FOREIGN\s+KEY|UNIQUE|CHECK|CONSTRAINT)', re.IGNORECASE)
+        
+        # Extract table name
+        table_match = table_pattern.search(create_statement)
+        if not table_match:
+            logger.warning("Could not extract table name")
+            return create_statement
+        
+        table_name = table_match.group(1)
+        
+        # Extract table content
+        paren_match = paren_pattern.search(create_statement)
+        if not paren_match:
+            logger.warning("Could not extract table definition")
+            return create_statement
+        
+        table_content = paren_match.group(1)
+        
+        # Split by commas, respecting nested parentheses
+        parts = SQLAgentOptimized._split_table_definition(table_content)
+        
+        # Single-pass processing: identify constraints and columns simultaneously
+        columns = []
+        constraints = []
+        primary_key_columns = set()
+        
+        # First, collect all PRIMARY KEY columns
+        for part in parts:
+            part = part.strip()
+            if part:
+                pk_match = pk_pattern.search(part)
+                if pk_match:
+                    pk_cols = [col.strip() for col in pk_match.group(1).split(',')]
+                    primary_key_columns.update(pk_cols)
+        
+        # Second pass: categorize and format
+        for part in parts:
+            part = part.strip()
+            if not part:
+                continue
+                
+            if constraint_pattern.match(part):
+                constraints.append(part)
+            else:
+                # This is a column definition
+                formatted_col = SQLAgentOptimized._format_column_definition(part)
+                if formatted_col:
+                    columns.append(formatted_col)
+        
+        # Build final schema string efficiently
+        all_parts = columns + constraints
+        schema_string = f"{table_name}({', '.join(all_parts)})"
+        
+        return schema_string
+
+    @staticmethod
+    def _split_table_definition(content: str) -> list:
+        """
+        Split table definition by commas, respecting nested parentheses.
+        Optimized version with reduced string operations.
+        """
+        if not content:
+            return []
+        
+        parts = []
+        current_part = []
+        paren_depth = 0
+        
+        for char in content:
+            if char == '(':
+                paren_depth += 1
+            elif char == ')':
+                paren_depth -= 1
+            elif char == ',' and paren_depth == 0:
+                part = ''.join(current_part).strip()
+                if part:
+                    parts.append(part)
+                current_part = []
+                continue
+                
+            current_part.append(char)
+        
+        # Add the last part
+        part = ''.join(current_part).strip()
+        if part:
+            parts.append(part)
+        
+        return parts
+
+    @staticmethod
+    def _compress_schema_string(schema_string: str, logger: logging.Logger) -> str:
+        """
+        Apply additional compression to the schema string while preserving meaning.
+        Optimized version with compiled regex patterns and single-pass replacements.
+        """
+        logger.debug("Applying compression to schema string")
+        
+        # Pre-compiled regex patterns for better performance
+        type_patterns = [
+            (re.compile(r'\binteger\b', re.IGNORECASE), 'int'),
+            (re.compile(r'\bvarchar\b', re.IGNORECASE), 'str'),
+            (re.compile(r'\btimestamp\b', re.IGNORECASE), 'ts'),
+            (re.compile(r'\bdecimal\b', re.IGNORECASE), 'dec'),
+            (re.compile(r'\bnumeric\b', re.IGNORECASE), 'num'),
+            (re.compile(r'\bboolean\b', re.IGNORECASE), 'bool'),
+            (re.compile(r'\bcharacter\b', re.IGNORECASE), 'char')
+        ]
+        
+        constraint_patterns = [
+            (re.compile(r'\bPRIMARY KEY\b', re.IGNORECASE), 'PK'),
+            (re.compile(r'\bFOREIGN KEY\b', re.IGNORECASE), 'FK'),
+            (re.compile(r'\bREFERENCES\b', re.IGNORECASE), 'REF'),
+            (re.compile(r'\bUNIQUE\b', re.IGNORECASE), 'UQ'),
+            (re.compile(r'\bCHECK\b', re.IGNORECASE), 'CK')
+        ]
+        
+        # Apply all type abbreviations
+        compressed = schema_string
+        for pattern, replacement in type_patterns:
+            compressed = pattern.sub(replacement, compressed)
+        
+        # Apply all constraint abbreviations
+        for pattern, replacement in constraint_patterns:
+            compressed = pattern.sub(replacement, compressed)
+        
+        # Single-pass spacing optimization
+        spacing_patterns = [
+            (re.compile(r'\s*\(\s*'), '('),
+            (re.compile(r'\s*\)\s*'), ')'),
+            (re.compile(r'\s*,\s*'), ','),
+            (re.compile(r'\s*:\s*'), ':'),
+            (re.compile(r'(FK|PK|UQ|CK)\s+\('), r'\1(')
+        ]
+        
+        for pattern, replacement in spacing_patterns:
+            compressed = pattern.sub(replacement, compressed)
+        
+        return compressed
+
+    @staticmethod
+    def _format_column_definition(column_def: str) -> str:
+        """
+        Format a column definition for the schema string.
+        Optimized version with compiled regex pattern.
+        """
+        # Pre-compiled regex for better performance
+        column_pattern = re.compile(r'^(\w+)\s+(\w+(?:\([^)]+\))?)')
+        
+        # Normalize whitespace once
+        column_def = re.sub(r'\s+', ' ', column_def.strip())
+        
+        # Extract column name and data type
+        match = column_pattern.match(column_def)
+        if match:
+            return f"{match.group(1)}: {match.group(2)}"
+        
+        # Fallback for edge cases
+        parts = column_def.split(None, 1)  # Split on first whitespace only
+        if len(parts) >= 2:
+            return f"{parts[0]}: {parts[1]}"
+        
+        return column_def
