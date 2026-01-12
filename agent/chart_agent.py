@@ -96,6 +96,9 @@ class ChartAgent:
         log_info(self.logger, "ChartAgent.Init", f"Step 3: Created Strands agent with Bedrock model and Code Interpreter tool")
         log_info(self.logger, "ChartAgent.Init", f"Ending function with region={aws_region}, bucket={chart_s3_bucket}, cloudfront={cloudfront_domain}")
            
+    
+    
+
     def _build_system_prompt(self) -> str:
         """
         Build the system prompt for chart generation with instructions and constraints.
@@ -448,6 +451,48 @@ class ChartAgent:
             - Use exactly: `plt.savefig('chart.png', format='png', dpi=100, bbox_inches='tight')`
             </file_path_requirement>
 
+            <matplotlib_parameter_guidelines>
+            CRITICAL: Always validate matplotlib method parameters to avoid AttributeError exceptions.
+
+            ## Common Parameter Mistakes to Avoid:
+
+            ### 1. Text Annotation Parameters
+            - ax.text() VALID parameters: x, y, s, fontsize, fontweight, color, ha, va, rotation, alpha, bbox
+            - ax.text() INVALID parameters: labelpad (this is for axis labels only)
+            - NEVER use labelpad with ax.text() - it will cause AttributeError
+
+            ### 2. Axis Label vs Text Annotation Parameters
+            - labelpad is ONLY for: ax.set_xlabel(), ax.set_ylabel(), ax.set_title()
+            - labelpad is NEVER for: ax.text(), ax.annotate()
+
+            ### 3. Bar Chart Parameters
+            - ax.bar()/ax.barh() VALID: x, height/width, label, color, alpha, edgecolor, linewidth
+            - ax.bar()/ax.barh() INVALID: fontsize, fontweight (these are for text, not bars)
+
+            ### 4. Legend Parameters
+            - ax.legend() VALID: loc, frameon, fancybox, shadow, framealpha, fontsize, edgecolor, facecolor
+            - legend.get_texts() VALID: set_color(), set_fontsize()
+
+            ## Parameter Validation Checklist:
+            Before generating any matplotlib code, verify:
+            1. ✓ Text methods (ax.text, ax.annotate) use only text-specific parameters
+            2. ✓ Axis methods (set_xlabel, set_ylabel) use only axis-specific parameters  
+            3. ✓ Bar methods use only bar-specific parameters
+            4. ✓ No mixing of parameter types between different method categories
+            5. ✓ All parameters are spelled correctly and exist in the matplotlib API
+
+            ## Safe Parameter Patterns:
+            ```python
+            # CORRECT text annotation
+            ax.text(x, y, text, fontsize=9, fontweight='500', color='#ecf0f1', ha='left', va='center')
+
+            # CORRECT axis label
+            ax.set_xlabel('Label', fontsize=12, fontweight='600', color='#ecf0f1', labelpad=10)
+
+            # CORRECT bar creation
+            ax.barh(y, width, label='2024', color='#EC7063', alpha=0.85, edgecolor='#2c3e50', linewidth=1.5)
+            </matplotlib_parameter_guidelines>
+
             <code_safety_rules>
             **Code Safety Restrictions:**
             - No file system operations except saving to 'chart.png'
@@ -672,11 +717,26 @@ class ChartAgent:
 
     def _generate_visualization_code(self, user_query: str, sql: str, 
                                      results: List[Dict[str, Any]], row_count: int) -> Optional[str]:
-        """Generate Python visualization code from query results.
+        """
+        Generate Python visualization code from query results.
+        Added pre-filtering for explicit chart requests only.
         
         Returns:
-            Python code string if successful, None if no code generated
+            Python code string if successful and chart was explicitly requested, None otherwise
         """
+        
+        # Pre-filter: Skip single row results
+        if row_count <= 1:
+            log_info(self.logger, "ChartAgent._generate_visualization_code", 
+                    f"Skipping chart generation - single row result not suitable for visualization")
+            return None
+        
+        # Pre-filter: Skip if results are empty
+        if not results:
+            log_info(self.logger, "ChartAgent._generate_visualization_code", 
+                    f"Skipping chart generation - no results to visualize")
+            return None
+
         results_preview = results[:100] if results else [] #Limit the data for charts to a max of 100 rows
         
         # Convert datetime objects to ISO format strings for safe serialization
@@ -984,3 +1044,4 @@ class ChartAgent:
             )
             
             return None
+
