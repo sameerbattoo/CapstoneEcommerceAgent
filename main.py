@@ -114,6 +114,7 @@ class ECommerceAgentApplication:
             'agentcore_memory_id': self._validate_env_var("AGENTCORE_MEMORY_ID"),
             'chart_s3_bucket': self._validate_env_var("CHART_S3_BUCKET"),
             'cloudfront_domain': os.getenv("CLOUDFRONT_DOMAIN"),  # Optional CloudFront domain
+            'use_conservative_sqlagent': os.getenv("USE_CONSERVATIVE_SQLAGENT", "true").lower() == "true",
             'db_config': {
                 "host": self._validate_env_var("DB_HOST"),
                 "port": self._validate_env_var("DB_PORT"),
