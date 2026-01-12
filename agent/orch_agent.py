@@ -1,4 +1,4 @@
-"""Orchestrator Agent and related classes for managing agent instances."""
+\"""Orchestrator Agent and related classes for managing agent instances."""
 
 import logging
 import time
@@ -349,8 +349,14 @@ class AgentManager:
             cache_key = self._tenant_id.lower()
             cached_schema = schema_cache.get(cache_key, {})
             
-            # Create SQL agent with optional cached schema and session_id
-            self._sql_agent = sql_agent.SQLAgent(
+            # Determine which SQL agent to use based on configuration
+            use_conservative = self.config.get('use_conservative_sqlagent', True)
+            
+            # Select the appropriate SQL agent class
+            agent_class = sql_agent.SQLAgent if use_conservative else sql_agent.SQLAgentOptimized
+            
+            # Single instantiation with all parameters
+            self._sql_agent = agent_class(
                 self.logger,
                 self.config['db_pool'],
                 self.config['aws_region'],
@@ -484,7 +490,7 @@ class AgentManager:
             2. **get_answers_for_structured_data**
             - Purpose: Handles queries related to Transactional Data.
             - Use when: User asks about orders, shipments, inventory, sales data, or other structured information.
-            - Action: Generates SQL, executes it, and returns formatted results.
+            - Action: Generates SQL, executes it and returns formatted results, creates graphical representation of the results if user has explicitly asked for it.
 
             3. **get_answers_for_unstructured_data**
             - Purpose: Processes queries related to Product Knowledge Base.
@@ -512,8 +518,8 @@ class AgentManager:
             CRITICAL: You MUST always check tool responses for chart data and display charts when present.
 
             **Chart Detection and Display Protocol:**
-            1. After calling any tool, immediately inspect the response for a `chart_url` field
-            2. If no tool is called or `chart_url` field doesn't exist in the tool response, do not invent the `chart_url` field, skip the chart display section
+            1. Only get_answers_for_structured_data tool generates charts. After calling this tool, immediately inspect the response for a `chart_url` field
+            2. If no tool is called or `chart_url` field doesn't exist in the tool response, do not invent the `chart_url` field, skip the chart display section altogether
             3. When a `chart_url` is present in the tool response, you MUST display it - this is NOT optional
                 - Display the chart in a dedicated "Data Visualization" section immediately after the data table
                 - Use this EXACT format (replace {{chart_url}} with the actual URL from the response):
@@ -524,15 +530,17 @@ class AgentManager:
                 - The chart should appear BEFORE the insights/summary section and AFTER the data table
 
             **Verification Checklist (complete before finalizing response):**
+            - ✓ Was the tool - get_answers_for_structured_data called?
             - ✓ Did the tool response contain a chart_url field?
-            - ✓ If yes, did I include the chart image in my response?
-            - ✓ If yes,  Is the chart displayed in the correct position (after table, before insights)?
+                - ✓ If yes, did I include the chart image in my response?
+                - ✓ If yes,  Is the chart displayed in the correct position (after table, before insights)?
             - ✓ If no, did I exclude the chart image section in my response?
             </chart_display_rules>
 
             <tool_instructions>
             ## When using **get_answers_for_structured_data**:
-            - For queries about "my orders," "my products," or "my shipments," add a WHERE clause: `customers.email='{self._user_email}'`
+            - For queries about "my orders" "my products", "my shipments" or any query intent related to the current user JOIN the {self._tenant_id}.Customers TABLE add a WHERE clause: `{self._tenant_id}.customers.email='{self._user_email}'`
+            - If the user explicitly asks for generating visuals, charts or plots, pass this query query text to the tool
             - Use this basic HTML table format:
                ```html
                <div style="overflow-x: auto; margin: 20px 0;">
@@ -589,10 +597,11 @@ class AgentManager:
             </workflow>
 
             <response_format>
+            When responding to a user query, provide your answer immediately, stating with Reasoning without any preamble, focusing only on addressing the user's specific request.
             Follow this EXACT structure for every response involving data:
 
             **Reasoning**
-            - Briefly explain how you analyzed the query and which tool you selected
+            - Briefly explain how you analyzed the query and which tool you selected and why
 
             **Data Table**
             - Present tabular data using the HTML table format from tool_instructions
@@ -619,12 +628,12 @@ class AgentManager:
               ```
 
             **Data Visualization (MANDATORY when chart_url is present)**
-            - Check the tool response for chart_url
+            - Check if get_answers_for_structured_data tool was called and the response for chart_url
             - When present, display using:
               ```html
+              <h3>Data Visualization</h3>
               <img src="{{chart_url}}" alt="Data Visualization" style="max-width: 100%; height: auto; border: 1px solid #ddd; border-radius: 4px; padding: 5px;" />
               ```
-            - DO NOT SKIP THIS STEP if chart_url exists in the response
 
             **Key Insights**
             - Provide brief, concise insights about the data
@@ -635,12 +644,11 @@ class AgentManager:
             - Place at the end of the response
 
             **Follow-up Prompt**
-            - End with a relevant follow-up question based on the user's query
+            - End with a relevant follow-up question based on the user's query. Display them in a bullet point list.
 
-            IMPORTANT: Steps must appear in this exact order. Never skip Step 3 when chart_url is present in the tool response.
+            IMPORTANT: Steps must appear in this exact order. 
             </response_format>
 
-            When responding to a user query, provide your answer immediately without any preamble, focusing only on addressing the user's specific request.
             """
     
     def initialize_orchestrator(
@@ -878,7 +886,7 @@ def get_answers_for_structured_data(user_query: str, tool_context: ToolContext) 
 
     try:
         start_time = time.time()
-        response = agent_manager.sql_agent.process_query(user_query)
+        response = agent_manager.sql_agent.process_query(user_query, agent_manager.user_email)
         end_time = time.time()
         logger.info(f"Request processed in {end_time - start_time:.2f} seconds in the structured assistant")
         
